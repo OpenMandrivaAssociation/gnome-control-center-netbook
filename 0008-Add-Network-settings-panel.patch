@@ -1,0 +1,1774 @@
+From 12ea2baf14485cc4bb762e61bb61bec2fc40ed09 Mon Sep 17 00:00:00 2001
+From: Thomas Wood <thomas.wood@intel.com>
+Date: Thu, 26 Aug 2010 15:37:55 +0100
+Subject: [PATCH 08/13] Add Network settings panel
+
+---
+ capplets/network/Makefile.am                       |   49 +-
+ capplets/network/cc-network-panel.c                |  168 +++
+ capplets/network/cc-network-panel.h                |   54 +
+ capplets/network/gnome-network-properties.c        |    2 +-
+ .../network/gnome-network-properties.desktop.in.in |    2 +-
+ capplets/network/gnome-network-properties.ui       | 1105 +++++++++++---------
+ capplets/network/network-module.c                  |   42 +
+ po/POTFILES.in                                     |    1 +
+ 8 files changed, 898 insertions(+), 525 deletions(-)
+ create mode 100644 capplets/network/cc-network-panel.c
+ create mode 100644 capplets/network/cc-network-panel.h
+ create mode 100644 capplets/network/network-module.c
+
+diff --git a/capplets/network/Makefile.am b/capplets/network/Makefile.am
+index 1ec5571..fc7032e 100644
+--- a/capplets/network/Makefile.am
++++ b/capplets/network/Makefile.am
+@@ -1,10 +1,50 @@
++NULL =
++
+ # This is used in GNOMECC_CAPPLETS_CFLAGS
+ cappletname = network
+ 
++INCLUDES =						\
++	$(GNOMECC_CAPPLETS_CFLAGS)			\
++	-I$(top_srcdir)/libgnome-control-center-extension \
++	-DGNOMELOCALEDIR="\"$(datadir)/locale\""	\
++	-DGNOMECC_UI_DIR="\"$(uidir)\""			\
++	$(NULL)
++
+ bin_PROGRAMS = gnome-network-properties
+ 
+-gnome_network_properties_SOURCES = gnome-network-properties.c
+-gnome_network_properties_LDADD = $(GNOMECC_CAPPLETS_LIBS)
++ccmodulesdir = $(EXTENSIONSDIR)
++ccmodules_LTLIBRARIES = libnetwork.la
++
++libnetwork_la_SOURCES =			\
++	network-module.c		\
++	cc-network-panel.h		\
++	cc-network-panel.c		\
++	gnome-network-properties.c	\
++	$(NULL)
++
++libnetwork_la_LDFLAGS =			\
++	$(EXTENSION_LIBTOOL_FLAGS)	\
++	$(NULL)
++
++libnetwork_la_LIBADD =			\
++	$(EXTENSION_LIBS)		\
++	$(EXTENSION_COMMON_LIBS)	\
++	$(NULL)
++
++libnetwork_la_CFLAGS =			\
++	$(EXTENSION_CFLAGS)		\
++	$(EXTENSION_COMMON_CFLAGS)	\
++	$(NULL)
++
++libnetwork_la_LIBTOOLFLAGS = --tag=disable-static
++
++gnome_network_properties_SOURCES = 	\
++	gnome-network-properties.c	\
++	$(NULL)
++
++gnome_network_properties_LDADD =	\
++	$(GNOMECC_CAPPLETS_LIBS)	\
++	$(NULL)
+ 
+ @INTLTOOL_DESKTOP_RULE@
+ 
+@@ -28,11 +68,6 @@ desktopdir = $(datadir)/applications
+ desktop_in_files = gnome-network-properties.desktop.in
+ desktop_DATA = $(desktop_in_files:.desktop.in=.desktop)
+ 
+-INCLUDES = \
+-	$(GNOMECC_CAPPLETS_CFLAGS) \
+-	-DGNOMELOCALEDIR="\"$(datadir)/locale\"" \
+-	-DGNOMECC_UI_DIR="\"$(uidir)\""
+-
+ gtk_update_icon_cache = gtk-update-icon-cache -f -t $(datadir)/icons/hicolor
+ uninstall-hook: update-icon-cache
+ install-data-hook: update-icon-cache
+diff --git a/capplets/network/cc-network-panel.c b/capplets/network/cc-network-panel.c
+new file mode 100644
+index 0000000..62e7be4
+--- /dev/null
++++ b/capplets/network/cc-network-panel.c
+@@ -0,0 +1,168 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#include "config.h"
++
++#include <stdlib.h>
++#include <stdio.h>
++
++#include <gtk/gtk.h>
++#include <gio/gio.h>
++#include <glib/gi18n-lib.h>
++#include <gconf/gconf-client.h>
++
++#define GNOME_DESKTOP_USE_UNSTABLE_API
++#include <libgnomeui/gnome-desktop-thumbnail.h>
++
++#include "cc-network-panel.h"
++
++#define CC_NETWORK_PANEL_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), CC_TYPE_NETWORK_PANEL, CcNetworkPanelPrivate))
++
++#define GNOMECC_GNP_UI_FILE (GNOMECC_UI_DIR "/gnome-network-properties.ui")
++
++struct CcNetworkPanelPrivate
++{
++        GConfClient *client;
++        GtkBuilder *builder;
++};
++
++enum {
++        PROP_0,
++};
++
++static void     cc_network_panel_class_init     (CcNetworkPanelClass *klass);
++static void     cc_network_panel_init           (CcNetworkPanel      *network_panel);
++static void     cc_network_panel_dispose        (GObject             *object);
++
++G_DEFINE_DYNAMIC_TYPE (CcNetworkPanel, cc_network_panel, CC_TYPE_PANEL)
++
++static GtkWidget*
++_gtk_builder_get_widget (GtkBuilder *builder, const gchar *name)
++{
++        return GTK_WIDGET (gtk_builder_get_object (builder, name));
++}
++
++
++static void
++setup_panel (CcNetworkPanel *panel)
++{
++        GtkBuilder  *builder;
++        GError *error = NULL;
++        gchar *builder_widgets[] = {"network_proxy_vbox", "adjustment1",
++                                    "adjustment2", "adjustment3", "adjustment4",
++                                    "delete_button_img", NULL};
++        GConfClient *client;
++        GtkWidget   *widget;
++
++        client = gconf_client_get_default ();
++        gconf_client_add_dir (client, "/system/http_proxy",
++                              GCONF_CLIENT_PRELOAD_ONELEVEL, NULL);
++        gconf_client_add_dir (client, "/system/proxy",
++                              GCONF_CLIENT_PRELOAD_ONELEVEL, NULL);
++
++        builder = gtk_builder_new ();
++        if (gtk_builder_add_objects_from_file (builder, GNOMECC_GNP_UI_FILE,
++                                               builder_widgets, &error) == 0) {
++                g_warning ("Could not load main dialog: %s",
++                           error->message);
++                g_error_free (error);
++                g_object_unref (builder);
++                g_object_unref (client);
++                return;
++        }
++
++        setup_dialog (builder);
++        widget = _gtk_builder_get_widget (builder, "network_proxy_vbox");
++        gtk_widget_show_all (widget);
++        gtk_container_add (GTK_CONTAINER (panel), widget);
++}
++
++static GObject *
++cc_network_panel_constructor (GType                  type,
++                               guint                  n_construct_properties,
++                               GObjectConstructParam *construct_properties)
++{
++        CcNetworkPanel      *network_panel;
++
++        network_panel = CC_NETWORK_PANEL (G_OBJECT_CLASS (cc_network_panel_parent_class)->constructor (type,
++                                                                                                                n_construct_properties,
++                                                                                                                construct_properties));
++
++        g_object_set (network_panel,
++                      "display-name", _("Network"),
++                      "id", "gnome-network-properties.desktop",
++                      NULL);
++
++        setup_panel (network_panel);
++
++        return G_OBJECT (network_panel);
++}
++
++static void
++cc_network_panel_class_init (CcNetworkPanelClass *klass)
++{
++        GObjectClass  *object_class = G_OBJECT_CLASS (klass);
++
++        object_class->constructor = cc_network_panel_constructor;
++        object_class->finalize = cc_network_panel_dispose;
++
++        g_type_class_add_private (klass, sizeof (CcNetworkPanelPrivate));
++}
++
++static void
++cc_network_panel_class_finalize (CcNetworkPanelClass *klass)
++{
++}
++
++static void
++cc_network_panel_init (CcNetworkPanel *panel)
++{
++        panel->priv = CC_NETWORK_PANEL_GET_PRIVATE (panel);
++}
++
++static void
++cc_network_panel_dispose (GObject *object)
++{
++        CcNetworkPanelPrivate *priv = CC_NETWORK_PANEL (object)->priv;
++
++        if (priv->builder)
++        {
++                g_object_unref (priv->builder);
++                priv->builder = NULL;
++        }
++
++        if (priv->client)
++        {
++                g_object_unref (priv->client);
++                priv->client = NULL;
++        }
++
++        G_OBJECT_CLASS (cc_network_panel_parent_class)->dispose (object);
++}
++
++void
++cc_network_panel_register (GIOModule *module)
++{
++        cc_network_panel_register_type (G_TYPE_MODULE (module));
++        g_io_extension_point_implement (CC_PANEL_EXTENSION_POINT_NAME,
++                                        CC_TYPE_NETWORK_PANEL,
++                                        "network",
++                                        10);
++}
+diff --git a/capplets/network/cc-network-panel.h b/capplets/network/cc-network-panel.h
+new file mode 100644
+index 0000000..4aa258a
+--- /dev/null
++++ b/capplets/network/cc-network-panel.h
+@@ -0,0 +1,54 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#ifndef __CC_NETWORK_PANEL_H
++#define __CC_NETWORK_PANEL_H
++
++#include <gtk/gtk.h>
++#include "cc-panel.h"
++
++G_BEGIN_DECLS
++
++#define CC_TYPE_NETWORK_PANEL         (cc_network_panel_get_type ())
++#define CC_NETWORK_PANEL(o)           (G_TYPE_CHECK_INSTANCE_CAST ((o), CC_TYPE_NETWORK_PANEL, CcNetworkPanel))
++#define CC_NETWORK_PANEL_CLASS(k)     (G_TYPE_CHECK_CLASS_CAST((k), CC_TYPE_NETWORK_PANEL, CcNetworkPanelClass))
++#define CC_IS_NETWORK_PANEL(o)        (G_TYPE_CHECK_INSTANCE_TYPE ((o), CC_TYPE_NETWORK_PANEL))
++#define CC_IS_NETWORK_PANEL_CLASS(k)  (G_TYPE_CHECK_CLASS_TYPE ((k), CC_TYPE_NETWORK_PANEL))
++#define CC_NETWORK_PANEL_GET_CLASS(o) (G_TYPE_INSTANCE_GET_CLASS ((o), CC_TYPE_NETWORK_PANEL, CcNetworkPanelClass))
++
++typedef struct CcNetworkPanelPrivate CcNetworkPanelPrivate;
++
++typedef struct
++{
++        CcPanel                 parent;
++        CcNetworkPanelPrivate *priv;
++} CcNetworkPanel;
++
++typedef struct
++{
++        CcPanelClass   parent_class;
++} CcNetworkPanelClass;
++
++GType              cc_network_panel_get_type   (void);
++void               cc_network_panel_register   (GIOModule         *module);
++
++G_END_DECLS
++
++#endif /* __CC_NETWORK_PANEL_H */
+diff --git a/capplets/network/gnome-network-properties.c b/capplets/network/gnome-network-properties.c
+index e3f0bed..922119a 100644
+--- a/capplets/network/gnome-network-properties.c
++++ b/capplets/network/gnome-network-properties.c
+@@ -1202,7 +1202,7 @@ cb_ignore_hosts_gconf_changed (GConfClient *client, guint cnxn_id,
+ 	populate_listmodel (GTK_LIST_STORE (model), ignore_hosts);
+ }
+ 
+-static void
++void
+ setup_dialog (GtkBuilder *builder)
+ {
+ 	GConfPropertyEditor *peditor;
+diff --git a/capplets/network/gnome-network-properties.desktop.in.in b/capplets/network/gnome-network-properties.desktop.in.in
+index 4091c20..9f1b8d8 100644
+--- a/capplets/network/gnome-network-properties.desktop.in.in
++++ b/capplets/network/gnome-network-properties.desktop.in.in
+@@ -6,7 +6,7 @@ Icon=gnome-network-properties
+ Terminal=false
+ Type=Application
+ StartupNotify=true
+-Categories=GNOME;GTK;Settings;X-GNOME-NetworkSettings;
++Categories=GNOME;GTK;Settings;HardwareSettings;
+ OnlyShowIn=GNOME;
+ X-GNOME-Bugzilla-Bugzilla=GNOME
+ X-GNOME-Bugzilla-Product=gnome-control-center
+diff --git a/capplets/network/gnome-network-properties.ui b/capplets/network/gnome-network-properties.ui
+index 2c41d6b..f4e590b 100644
+--- a/capplets/network/gnome-network-properties.ui
++++ b/capplets/network/gnome-network-properties.ui
+@@ -11,114 +11,127 @@
+     <child internal-child="vbox">
+       <object class="GtkVBox" id="dialog-vbox1">
+         <property name="visible">True</property>
++        <property name="orientation">vertical</property>
+         <property name="spacing">2</property>
+         <child>
+-          <object class="GtkAlignment" id="alignment1">
+-            <property name="xscale">0</property>
++          <object class="GtkVBox" id="network_proxy_vbox">
++            <property name="visible">True</property>
++            <property name="orientation">vertical</property>
++            <property name="spacing">6</property>
+             <child>
+-              <object class="GtkHBox" id="hbox2">
+-                <property name="visible">True</property>
+-                <property name="spacing">3</property>
+-                <child>
+-                  <object class="GtkLabel" id="label1">
+-                    <property name="visible">True</property>
+-                    <property name="xalign">1</property>
+-                    <property name="label" translatable="yes">Location:</property>
+-                  </object>
+-                  <packing>
+-                    <property name="position">0</property>
+-                  </packing>
+-                </child>
++              <object class="GtkAlignment" id="alignment1">
++                <property name="xscale">0</property>
+                 <child>
+-                  <object class="GtkComboBox" id="location_combobox">
++                  <object class="GtkHBox" id="hbox2">
+                     <property name="visible">True</property>
++                    <property name="spacing">3</property>
++                    <child>
++                      <object class="GtkLabel" id="label31">
++                        <property name="visible">True</property>
++                        <property name="xalign">1</property>
++                        <property name="label" translatable="yes">Location:</property>
++                      </object>
++                      <packing>
++                        <property name="position">0</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkComboBox" id="location_combobox">
++                        <property name="visible">True</property>
++                      </object>
++                      <packing>
++                        <property name="position">1</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkButton" id="delete_button">
++                        <property name="label" translatable="yes">_Delete Location</property>
++                        <property name="visible">True</property>
++                        <property name="sensitive">False</property>
++                        <property name="can_focus">True</property>
++                        <property name="receives_default">True</property>
++                        <property name="image">delete_button_img</property>
++                        <property name="use_underline">True</property>
++                      </object>
++                      <packing>
++                        <property name="expand">False</property>
++                        <property name="fill">False</property>
++                        <property name="position">2</property>
++                      </packing>
++                    </child>
+                   </object>
+-                  <packing>
+-                    <property name="position">1</property>
+-                  </packing>
+                 </child>
+               </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">False</property>
++                <property name="position">0</property>
++              </packing>
+             </child>
+-          </object>
+-          <packing>
+-            <property name="expand">False</property>
+-            <property name="fill">False</property>
+-            <property name="position">1</property>
+-          </packing>
+-        </child>
+-        <child>
+-          <object class="GtkNotebook" id="notebook1">
+-            <property name="visible">True</property>
+-            <property name="can_focus">True</property>
+-            <property name="border_width">5</property>
+             <child>
+-              <object class="GtkVBox" id="vbox1">
++              <object class="GtkNotebook" id="notebook1">
+                 <property name="visible">True</property>
+-                <property name="border_width">12</property>
+-                <property name="spacing">18</property>
+-                <child>
+-                  <object class="GtkRadioButton" id="none_radiobutton">
+-                    <property name="label" translatable="yes">&lt;b&gt;Di_rect internet connection&lt;/b&gt;</property>
+-                    <property name="visible">True</property>
+-                    <property name="can_focus">True</property>
+-                    <property name="receives_default">False</property>
+-                    <property name="use_underline">True</property>
+-                    <property name="draw_indicator">True</property>
+-                  </object>
+-                  <packing>
+-                    <property name="expand">False</property>
+-                    <property name="fill">False</property>
+-                    <property name="position">0</property>
+-                  </packing>
+-                </child>
++                <property name="can_focus">True</property>
++                <property name="border_width">5</property>
+                 <child>
+-                  <object class="GtkVBox" id="no_direct_vbox">
++                  <object class="GtkVBox" id="vbox1">
+                     <property name="visible">True</property>
++                    <property name="border_width">12</property>
++                    <property name="orientation">vertical</property>
+                     <property name="spacing">18</property>
+                     <child>
+-                      <object class="GtkVBox" id="manual_vbox">
++                      <object class="GtkRadioButton" id="none_radiobutton">
+                         <property name="visible">True</property>
+-                        <property name="spacing">6</property>
+-                        <child>
+-                          <object class="GtkRadioButton" id="manual_radiobutton">
+-                            <property name="label" translatable="yes">&lt;b&gt;_Manual proxy configuration&lt;/b&gt;</property>
+-                            <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="receives_default">False</property>
+-                            <property name="use_underline">True</property>
+-                            <property name="draw_indicator">True</property>
+-                            <property name="group">none_radiobutton</property>
+-                          </object>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+-                            <property name="position">0</property>
+-                          </packing>
+-                        </child>
++                        <property name="can_focus">True</property>
++                        <property name="receives_default">False</property>
++                        <property name="use_underline">True</property>
++                        <property name="active">True</property>
++                        <property name="draw_indicator">True</property>
+                         <child>
+-                          <object class="GtkCheckButton" id="same_proxy_checkbutton">
+-                            <property name="label" translatable="yes">_Use the same proxy for all protocols</property>
++                          <object class="GtkLabel" id="label3">
+                             <property name="visible">True</property>
+-                            <property name="sensitive">False</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="receives_default">False</property>
++                            <property name="label" translatable="yes">Di_rect internet connection</property>
+                             <property name="use_underline">True</property>
+-                            <property name="draw_indicator">True</property>
++                            <attributes>
++                              <attribute name="weight" value="bold"/>
++                            </attributes>
+                           </object>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+-                            <property name="position">1</property>
+-                          </packing>
+                         </child>
++                      </object>
++                      <packing>
++                        <property name="expand">False</property>
++                        <property name="fill">False</property>
++                        <property name="position">0</property>
++                      </packing>
++                    </child>
++                    <child>
++                      <object class="GtkVBox" id="no_direct_vbox">
++                        <property name="visible">True</property>
++                        <property name="orientation">vertical</property>
++                        <property name="spacing">18</property>
+                         <child>
+-                          <object class="GtkHBox" id="manual_box">
++                          <object class="GtkVBox" id="manual_vbox">
+                             <property name="visible">True</property>
+-                            <property name="sensitive">False</property>
++                            <property name="orientation">vertical</property>
++                            <property name="spacing">6</property>
+                             <child>
+-                              <object class="GtkLabel" id="label2">
++                              <object class="GtkRadioButton" id="manual_radiobutton">
+                                 <property name="visible">True</property>
+-                                <property name="label">      </property>
++                                <property name="can_focus">True</property>
++                                <property name="receives_default">False</property>
++                                <property name="use_underline">True</property>
++                                <property name="draw_indicator">True</property>
++                                <property name="group">none_radiobutton</property>
++                                <child>
++                                  <object class="GtkLabel" id="label4">
++                                    <property name="visible">True</property>
++                                    <property name="label" translatable="yes">_Manual proxy configuration</property>
++                                    <property name="use_underline">True</property>
++                                    <attributes>
++                                      <attribute name="weight" value="bold"/>
++                                    </attributes>
++                                  </object>
++                                </child>
+                               </object>
+                               <packing>
+                                 <property name="expand">False</property>
+@@ -127,326 +140,362 @@
+                               </packing>
+                             </child>
+                             <child>
+-                              <object class="GtkTable" id="manual_table">
++                              <object class="GtkCheckButton" id="same_proxy_checkbutton">
++                                <property name="label" translatable="yes">_Use the same proxy for all protocols</property>
+                                 <property name="visible">True</property>
+-                                <property name="n_rows">4</property>
+-                                <property name="n_columns">5</property>
+-                                <property name="column_spacing">12</property>
+-                                <property name="row_spacing">6</property>
+-                                <child>
+-                                  <object class="GtkLabel" id="label6">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">H_TTP proxy:</property>
+-                                    <property name="use_underline">True</property>
+-                                    <property name="mnemonic_widget">http_host_entry</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label7">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">_Secure HTTP proxy:</property>
+-                                    <property name="use_underline">True</property>
+-                                    <property name="mnemonic_widget">secure_host_entry</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="top_attach">1</property>
+-                                    <property name="bottom_attach">2</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label8">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">_FTP proxy:</property>
+-                                    <property name="use_underline">True</property>
+-                                    <property name="mnemonic_widget">ftp_host_entry</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="top_attach">2</property>
+-                                    <property name="bottom_attach">3</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label9">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">S_ocks host:</property>
+-                                    <property name="use_underline">True</property>
+-                                    <property name="mnemonic_widget">socks_host_entry</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="top_attach">3</property>
+-                                    <property name="bottom_attach">4</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkEntry" id="http_host_entry">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">1</property>
+-                                    <property name="right_attach">2</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkEntry" id="secure_host_entry">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">1</property>
+-                                    <property name="right_attach">2</property>
+-                                    <property name="top_attach">1</property>
+-                                    <property name="bottom_attach">2</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkEntry" id="ftp_host_entry">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">1</property>
+-                                    <property name="right_attach">2</property>
+-                                    <property name="top_attach">2</property>
+-                                    <property name="bottom_attach">3</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkEntry" id="socks_host_entry">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">1</property>
+-                                    <property name="right_attach">2</property>
+-                                    <property name="top_attach">3</property>
+-                                    <property name="bottom_attach">4</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label10">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">Port:</property>
+-                                    <accessibility>
+-                                      <relation type="label-for" target="http_port_spinbutton"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">2</property>
+-                                    <property name="right_attach">3</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label11">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">Port:</property>
+-                                    <accessibility>
+-                                      <relation type="label-for" target="secure_port_spinbutton"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">2</property>
+-                                    <property name="right_attach">3</property>
+-                                    <property name="top_attach">1</property>
+-                                    <property name="bottom_attach">2</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label12">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">Port:</property>
+-                                    <accessibility>
+-                                      <relation type="label-for" target="ftp_port_spinbutton"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">2</property>
+-                                    <property name="right_attach">3</property>
+-                                    <property name="top_attach">2</property>
+-                                    <property name="bottom_attach">3</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkLabel" id="label13">
+-                                    <property name="visible">True</property>
+-                                    <property name="xalign">0</property>
+-                                    <property name="label" translatable="yes">Port:</property>
+-                                    <accessibility>
+-                                      <relation type="label-for" target="socks_port_spinbutton"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">2</property>
+-                                    <property name="right_attach">3</property>
+-                                    <property name="top_attach">3</property>
+-                                    <property name="bottom_attach">4</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkSpinButton" id="http_port_spinbutton">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                    <property name="adjustment">adjustment4</property>
+-                                    <property name="climb_rate">1</property>
+-                                    <accessibility>
+-                                      <relation type="labelled-by" target="label10"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">3</property>
+-                                    <property name="right_attach">4</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkSpinButton" id="secure_port_spinbutton">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                    <property name="adjustment">adjustment3</property>
+-                                    <property name="climb_rate">1</property>
+-                                    <accessibility>
+-                                      <relation type="labelled-by" target="label11"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">3</property>
+-                                    <property name="right_attach">4</property>
+-                                    <property name="top_attach">1</property>
+-                                    <property name="bottom_attach">2</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
+-                                <child>
+-                                  <object class="GtkSpinButton" id="ftp_port_spinbutton">
+-                                    <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                    <property name="adjustment">adjustment2</property>
+-                                    <property name="climb_rate">1</property>
+-                                    <accessibility>
+-                                      <relation type="labelled-by" target="label12"/>
+-                                    </accessibility>
+-                                  </object>
+-                                  <packing>
+-                                    <property name="left_attach">3</property>
+-                                    <property name="right_attach">4</property>
+-                                    <property name="top_attach">2</property>
+-                                    <property name="bottom_attach">3</property>
+-                                    <property name="y_options"></property>
+-                                  </packing>
+-                                </child>
++                                <property name="sensitive">False</property>
++                                <property name="can_focus">True</property>
++                                <property name="receives_default">False</property>
++                                <property name="use_underline">True</property>
++                                <property name="draw_indicator">True</property>
++                              </object>
++                              <packing>
++                                <property name="expand">False</property>
++                                <property name="fill">False</property>
++                                <property name="position">1</property>
++                              </packing>
++                            </child>
++                            <child>
++                              <object class="GtkHBox" id="manual_box">
++                                <property name="visible">True</property>
++                                <property name="sensitive">False</property>
++                                <property name="orientation">vertical</property>
+                                 <child>
+-                                  <object class="GtkSpinButton" id="socks_port_spinbutton">
++                                  <object class="GtkLabel" id="label2">
+                                     <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                    <property name="adjustment">adjustment1</property>
+-                                    <property name="climb_rate">1</property>
+-                                    <accessibility>
+-                                      <relation type="labelled-by" target="label13"/>
+-                                    </accessibility>
++                                    <property name="label">      </property>
+                                   </object>
+                                   <packing>
+-                                    <property name="left_attach">3</property>
+-                                    <property name="right_attach">4</property>
+-                                    <property name="top_attach">3</property>
+-                                    <property name="bottom_attach">4</property>
+-                                    <property name="y_options"></property>
++                                    <property name="expand">False</property>
++                                    <property name="fill">False</property>
++                                    <property name="position">0</property>
+                                   </packing>
+                                 </child>
+                                 <child>
+-                                  <object class="GtkButton" id="details_button">
+-                                    <property name="label" translatable="yes">_Details</property>
++                                  <object class="GtkTable" id="manual_table">
+                                     <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
+-                                    <property name="receives_default">False</property>
+-                                    <property name="use_underline">True</property>
++                                    <property name="n_rows">4</property>
++                                    <property name="n_columns">5</property>
++                                    <property name="column_spacing">12</property>
++                                    <property name="row_spacing">6</property>
++                                    <child>
++                                      <object class="GtkLabel" id="label6">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">H_TTP proxy:</property>
++                                        <property name="use_underline">True</property>
++                                        <property name="mnemonic_widget">http_host_entry</property>
++                                      </object>
++                                      <packing>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label7">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">_Secure HTTP proxy:</property>
++                                        <property name="use_underline">True</property>
++                                        <property name="mnemonic_widget">secure_host_entry</property>
++                                      </object>
++                                      <packing>
++                                        <property name="top_attach">1</property>
++                                        <property name="bottom_attach">2</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label8">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">_FTP proxy:</property>
++                                        <property name="use_underline">True</property>
++                                        <property name="mnemonic_widget">ftp_host_entry</property>
++                                      </object>
++                                      <packing>
++                                        <property name="top_attach">2</property>
++                                        <property name="bottom_attach">3</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label9">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">S_ocks host:</property>
++                                        <property name="use_underline">True</property>
++                                        <property name="mnemonic_widget">socks_host_entry</property>
++                                      </object>
++                                      <packing>
++                                        <property name="top_attach">3</property>
++                                        <property name="bottom_attach">4</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkEntry" id="http_host_entry">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">1</property>
++                                        <property name="right_attach">2</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkEntry" id="secure_host_entry">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">1</property>
++                                        <property name="right_attach">2</property>
++                                        <property name="top_attach">1</property>
++                                        <property name="bottom_attach">2</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkEntry" id="ftp_host_entry">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">1</property>
++                                        <property name="right_attach">2</property>
++                                        <property name="top_attach">2</property>
++                                        <property name="bottom_attach">3</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkEntry" id="socks_host_entry">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">1</property>
++                                        <property name="right_attach">2</property>
++                                        <property name="top_attach">3</property>
++                                        <property name="bottom_attach">4</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label10">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">Port:</property>
++                                        <accessibility>
++                                          <relation type="label-for" target="http_port_spinbutton"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">2</property>
++                                        <property name="right_attach">3</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label11">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">Port:</property>
++                                        <accessibility>
++                                          <relation type="label-for" target="secure_port_spinbutton"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">2</property>
++                                        <property name="right_attach">3</property>
++                                        <property name="top_attach">1</property>
++                                        <property name="bottom_attach">2</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label12">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">Port:</property>
++                                        <accessibility>
++                                          <relation type="label-for" target="ftp_port_spinbutton"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">2</property>
++                                        <property name="right_attach">3</property>
++                                        <property name="top_attach">2</property>
++                                        <property name="bottom_attach">3</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkLabel" id="label13">
++                                        <property name="visible">True</property>
++                                        <property name="xalign">0</property>
++                                        <property name="label" translatable="yes">Port:</property>
++                                        <accessibility>
++                                          <relation type="label-for" target="socks_port_spinbutton"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">2</property>
++                                        <property name="right_attach">3</property>
++                                        <property name="top_attach">3</property>
++                                        <property name="bottom_attach">4</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkSpinButton" id="http_port_spinbutton">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                        <property name="adjustment">adjustment4</property>
++                                        <property name="climb_rate">1</property>
++                                        <accessibility>
++                                          <relation type="labelled-by" target="label10"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">3</property>
++                                        <property name="right_attach">4</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkSpinButton" id="secure_port_spinbutton">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                        <property name="adjustment">adjustment3</property>
++                                        <property name="climb_rate">1</property>
++                                        <accessibility>
++                                          <relation type="labelled-by" target="label11"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">3</property>
++                                        <property name="right_attach">4</property>
++                                        <property name="top_attach">1</property>
++                                        <property name="bottom_attach">2</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkSpinButton" id="ftp_port_spinbutton">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                        <property name="adjustment">adjustment2</property>
++                                        <property name="climb_rate">1</property>
++                                        <accessibility>
++                                          <relation type="labelled-by" target="label12"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">3</property>
++                                        <property name="right_attach">4</property>
++                                        <property name="top_attach">2</property>
++                                        <property name="bottom_attach">3</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkSpinButton" id="socks_port_spinbutton">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                        <property name="adjustment">adjustment1</property>
++                                        <property name="climb_rate">1</property>
++                                        <accessibility>
++                                          <relation type="labelled-by" target="label13"/>
++                                        </accessibility>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">3</property>
++                                        <property name="right_attach">4</property>
++                                        <property name="top_attach">3</property>
++                                        <property name="bottom_attach">4</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkButton" id="details_button">
++                                        <property name="label" translatable="yes">_Details</property>
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="receives_default">True</property>
++                                        <property name="use_underline">True</property>
++                                      </object>
++                                      <packing>
++                                        <property name="left_attach">4</property>
++                                        <property name="right_attach">5</property>
++                                        <property name="x_options">GTK_FILL</property>
++                                        <property name="y_options"></property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <placeholder/>
++                                    </child>
++                                    <child>
++                                      <placeholder/>
++                                    </child>
++                                    <child>
++                                      <placeholder/>
++                                    </child>
+                                   </object>
+                                   <packing>
+-                                    <property name="left_attach">4</property>
+-                                    <property name="right_attach">5</property>
+-                                    <property name="x_options">GTK_FILL</property>
+-                                    <property name="y_options"></property>
++                                    <property name="position">1</property>
+                                   </packing>
+                                 </child>
+-                                <child>
+-                                  <placeholder/>
+-                                </child>
+-                                <child>
+-                                  <placeholder/>
+-                                </child>
+-                                <child>
+-                                  <placeholder/>
+-                                </child>
+                               </object>
+                               <packing>
+-                                <property name="position">1</property>
++                                <property name="position">2</property>
+                               </packing>
+                             </child>
+                           </object>
+                           <packing>
+-                            <property name="position">2</property>
+-                          </packing>
+-                        </child>
+-                      </object>
+-                      <packing>
+-                        <property name="position">0</property>
+-                      </packing>
+-                    </child>
+-                    <child>
+-                      <object class="GtkVBox" id="vbox2">
+-                        <property name="visible">True</property>
+-                        <property name="spacing">6</property>
+-                        <child>
+-                          <object class="GtkRadioButton" id="auto_radiobutton">
+-                            <property name="label" translatable="yes">&lt;b&gt;_Automatic proxy configuration&lt;/b&gt;</property>
+-                            <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="receives_default">False</property>
+-                            <property name="use_underline">True</property>
+-                            <property name="draw_indicator">True</property>
+-                            <property name="group">none_radiobutton</property>
+-                          </object>
+-                          <packing>
+-                            <property name="expand">False</property>
+-                            <property name="fill">False</property>
+                             <property name="position">0</property>
+                           </packing>
+                         </child>
+                         <child>
+-                          <object class="GtkHBox" id="hbox1">
++                          <object class="GtkVBox" id="vbox2">
+                             <property name="visible">True</property>
++                            <property name="orientation">vertical</property>
++                            <property name="spacing">6</property>
+                             <child>
+-                              <object class="GtkLabel" id="label17">
++                              <object class="GtkRadioButton" id="auto_radiobutton">
+                                 <property name="visible">True</property>
+-                                <property name="label">      </property>
++                                <property name="can_focus">True</property>
++                                <property name="receives_default">False</property>
++                                <property name="use_underline">True</property>
++                                <property name="draw_indicator">True</property>
++                                <property name="group">none_radiobutton</property>
++                                <child>
++                                  <object class="GtkLabel" id="label5">
++                                    <property name="visible">True</property>
++                                    <property name="label" translatable="yes">_Automatic proxy configuration</property>
++                                    <property name="use_underline">True</property>
++                                    <attributes>
++                                      <attribute name="weight" value="bold"/>
++                                    </attributes>
++                                  </object>
++                                </child>
+                               </object>
+                               <packing>
+                                 <property name="expand">False</property>
+@@ -455,16 +504,12 @@
+                               </packing>
+                             </child>
+                             <child>
+-                              <object class="GtkHBox" id="auto_box">
++                              <object class="GtkHBox" id="hbox1">
+                                 <property name="visible">True</property>
+-                                <property name="sensitive">False</property>
+-                                <property name="spacing">12</property>
+                                 <child>
+-                                  <object class="GtkLabel" id="label18">
++                                  <object class="GtkLabel" id="label17">
+                                     <property name="visible">True</property>
+-                                    <property name="label" translatable="yes">Autoconfiguration _URL:</property>
+-                                    <property name="use_underline">True</property>
+-                                    <property name="mnemonic_widget">autoconfig_entry</property>
++                                    <property name="label">      </property>
+                                   </object>
+                                   <packing>
+                                     <property name="expand">False</property>
+@@ -473,9 +518,33 @@
+                                   </packing>
+                                 </child>
+                                 <child>
+-                                  <object class="GtkEntry" id="autoconfig_entry">
++                                  <object class="GtkHBox" id="auto_box">
+                                     <property name="visible">True</property>
+-                                    <property name="can_focus">True</property>
++                                    <property name="sensitive">False</property>
++                                    <property name="spacing">12</property>
++                                    <child>
++                                      <object class="GtkLabel" id="label18">
++                                        <property name="visible">True</property>
++                                        <property name="label" translatable="yes">Autoconfiguration _URL:</property>
++                                        <property name="use_underline">True</property>
++                                        <property name="mnemonic_widget">autoconfig_entry</property>
++                                      </object>
++                                      <packing>
++                                        <property name="expand">False</property>
++                                        <property name="fill">False</property>
++                                        <property name="position">0</property>
++                                      </packing>
++                                    </child>
++                                    <child>
++                                      <object class="GtkEntry" id="autoconfig_entry">
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="invisible_char">&#x2022;</property>
++                                      </object>
++                                      <packing>
++                                        <property name="position">1</property>
++                                      </packing>
++                                    </child>
+                                   </object>
+                                   <packing>
+                                     <property name="position">1</property>
+@@ -488,59 +557,41 @@
+                             </child>
+                           </object>
+                           <packing>
++                            <property name="expand">False</property>
++                            <property name="fill">False</property>
+                             <property name="position">1</property>
+                           </packing>
+                         </child>
+                       </object>
+                       <packing>
+-                        <property name="expand">False</property>
+-                        <property name="fill">False</property>
+                         <property name="position">1</property>
+                       </packing>
+                     </child>
+                   </object>
+-                  <packing>
+-                    <property name="position">1</property>
+-                  </packing>
+                 </child>
+-              </object>
+-            </child>
+-            <child type="tab">
+-              <object class="GtkLabel" id="label20">
+-                <property name="visible">True</property>
+-                <property name="label" translatable="yes">Proxy Configuration</property>
+-              </object>
+-              <packing>
+-                <property name="tab_fill">False</property>
+-              </packing>
+-            </child>
+-            <child>
+-              <object class="GtkVBox" id="vbox4">
+-                <property name="visible">True</property>
+-                <property name="border_width">12</property>
+-                <property name="spacing">6</property>
+-                <child>
+-                  <object class="GtkLabel" id="label_ignore_host">
++                <child type="tab">
++                  <object class="GtkLabel" id="label20">
+                     <property name="visible">True</property>
+-                    <property name="xalign">0</property>
+-                    <property name="label" translatable="yes">Ignore Host List</property>
+-                    <attributes>
+-                      <attribute name="weight" value="bold"/>
+-                    </attributes>
++                    <property name="label" translatable="yes">Proxy Configuration</property>
+                   </object>
+                   <packing>
+-                    <property name="expand">False</property>
+-                    <property name="fill">False</property>
+-                    <property name="position">0</property>
++                    <property name="tab_fill">False</property>
+                   </packing>
+                 </child>
+                 <child>
+-                  <object class="GtkHBox" id="hbox4">
++                  <object class="GtkVBox" id="vbox4">
+                     <property name="visible">True</property>
++                    <property name="border_width">12</property>
++                    <property name="orientation">vertical</property>
++                    <property name="spacing">6</property>
+                     <child>
+-                      <object class="GtkLabel" id="label22">
++                      <object class="GtkLabel" id="label_ignore_host">
+                         <property name="visible">True</property>
+-                        <property name="label">      </property>
++                        <property name="xalign">0</property>
++                        <property name="label" translatable="yes">Ignore Host List</property>
++                        <attributes>
++                          <attribute name="weight" value="bold"/>
++                        </attributes>
+                       </object>
+                       <packing>
+                         <property name="expand">False</property>
+@@ -549,88 +600,108 @@
+                       </packing>
+                     </child>
+                     <child>
+-                      <object class="GtkTable" id="table1">
++                      <object class="GtkHBox" id="hbox4">
+                         <property name="visible">True</property>
+-                        <property name="n_rows">2</property>
+-                        <property name="n_columns">2</property>
+-                        <property name="column_spacing">12</property>
+-                        <property name="row_spacing">6</property>
+-                        <child>
+-                          <object class="GtkEntry" id="entry_url">
+-                            <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                          </object>
+-                          <packing>
+-                            <property name="y_options"></property>
+-                          </packing>
+-                        </child>
+                         <child>
+-                          <object class="GtkButton" id="button_add_url">
+-                            <property name="label">gtk-add</property>
++                          <object class="GtkLabel" id="label22">
+                             <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="receives_default">False</property>
+-                            <property name="use_stock">True</property>
++                            <property name="label">      </property>
+                           </object>
+                           <packing>
+-                            <property name="left_attach">1</property>
+-                            <property name="right_attach">2</property>
+-                            <property name="x_options">GTK_FILL</property>
+-                            <property name="y_options"></property>
++                            <property name="expand">False</property>
++                            <property name="fill">False</property>
++                            <property name="position">0</property>
+                           </packing>
+                         </child>
+                         <child>
+-                          <object class="GtkScrolledWindow" id="scrolledwindow1">
++                          <object class="GtkTable" id="table1">
+                             <property name="visible">True</property>
+-                            <property name="can_focus">True</property>
+-                            <property name="hscrollbar_policy">automatic</property>
+-                            <property name="vscrollbar_policy">automatic</property>
+-                            <property name="shadow_type">in</property>
++                            <property name="n_rows">2</property>
++                            <property name="n_columns">2</property>
++                            <property name="column_spacing">12</property>
++                            <property name="row_spacing">6</property>
+                             <child>
+-                              <object class="GtkTreeView" id="treeview_ignore_host">
++                              <object class="GtkEntry" id="entry_url">
+                                 <property name="visible">True</property>
+                                 <property name="can_focus">True</property>
+-                                <property name="headers_visible">False</property>
++                                <property name="invisible_char">&#x2022;</property>
+                               </object>
++                              <packing>
++                                <property name="y_options"></property>
++                              </packing>
++                            </child>
++                            <child>
++                              <object class="GtkButton" id="button_add_url">
++                                <property name="label">gtk-add</property>
++                                <property name="visible">True</property>
++                                <property name="can_focus">True</property>
++                                <property name="receives_default">True</property>
++                                <property name="use_stock">True</property>
++                              </object>
++                              <packing>
++                                <property name="left_attach">1</property>
++                                <property name="right_attach">2</property>
++                                <property name="x_options">GTK_FILL</property>
++                                <property name="y_options"></property>
++                              </packing>
+                             </child>
+-                          </object>
+-                          <packing>
+-                            <property name="top_attach">1</property>
+-                            <property name="bottom_attach">2</property>
+-                            <property name="x_options">GTK_FILL</property>
+-                          </packing>
+-                        </child>
+-                        <child>
+-                          <object class="GtkAlignment" id="alignment2">
+-                            <property name="visible">True</property>
+-                            <property name="xalign">0</property>
+-                            <property name="yalign">0</property>
+-                            <property name="yscale">0</property>
+                             <child>
+-                              <object class="GtkHBox" id="hbox3">
++                              <object class="GtkScrolledWindow" id="scrolledwindow1">
+                                 <property name="visible">True</property>
++                                <property name="can_focus">True</property>
++                                <property name="hscrollbar_policy">automatic</property>
++                                <property name="vscrollbar_policy">automatic</property>
++                                <property name="shadow_type">in</property>
+                                 <child>
+-                                  <object class="GtkButton" id="button_remove_url">
+-                                    <property name="label">gtk-remove</property>
++                                  <object class="GtkTreeView" id="treeview_ignore_host">
+                                     <property name="visible">True</property>
+                                     <property name="can_focus">True</property>
+-                                    <property name="receives_default">False</property>
+-                                    <property name="use_stock">True</property>
++                                    <property name="headers_visible">False</property>
+                                   </object>
+-                                  <packing>
+-                                    <property name="position">0</property>
+-                                  </packing>
+                                 </child>
+                               </object>
++                              <packing>
++                                <property name="top_attach">1</property>
++                                <property name="bottom_attach">2</property>
++                                <property name="x_options">GTK_FILL</property>
++                              </packing>
++                            </child>
++                            <child>
++                              <object class="GtkAlignment" id="alignment2">
++                                <property name="visible">True</property>
++                                <property name="xalign">0</property>
++                                <property name="yalign">0</property>
++                                <property name="yscale">0</property>
++                                <child>
++                                  <object class="GtkHBox" id="hbox3">
++                                    <property name="visible">True</property>
++                                    <child>
++                                      <object class="GtkButton" id="button_remove_url">
++                                        <property name="label">gtk-remove</property>
++                                        <property name="visible">True</property>
++                                        <property name="can_focus">True</property>
++                                        <property name="receives_default">True</property>
++                                        <property name="use_stock">True</property>
++                                      </object>
++                                      <packing>
++                                        <property name="position">0</property>
++                                      </packing>
++                                    </child>
++                                  </object>
++                                </child>
++                              </object>
++                              <packing>
++                                <property name="left_attach">1</property>
++                                <property name="right_attach">2</property>
++                                <property name="top_attach">1</property>
++                                <property name="bottom_attach">2</property>
++                                <property name="x_options">GTK_FILL</property>
++                                <property name="y_options">GTK_FILL</property>
++                              </packing>
+                             </child>
+                           </object>
+                           <packing>
+-                            <property name="left_attach">1</property>
+-                            <property name="right_attach">2</property>
+-                            <property name="top_attach">1</property>
+-                            <property name="bottom_attach">2</property>
+-                            <property name="x_options">GTK_FILL</property>
+-                            <property name="y_options">GTK_FILL</property>
++                            <property name="position">1</property>
+                           </packing>
+                         </child>
+                       </object>
+@@ -643,28 +714,28 @@
+                     <property name="position">1</property>
+                   </packing>
+                 </child>
++                <child type="tab">
++                  <object class="GtkLabel" id="label21">
++                    <property name="visible">True</property>
++                    <property name="label" translatable="yes">Ignored Hosts</property>
++                  </object>
++                  <packing>
++                    <property name="position">1</property>
++                    <property name="tab_fill">False</property>
++                  </packing>
++                </child>
+               </object>
+               <packing>
+                 <property name="position">1</property>
+               </packing>
+             </child>
+-            <child type="tab">
+-              <object class="GtkLabel" id="label21">
+-                <property name="visible">True</property>
+-                <property name="label" translatable="yes">Ignored Hosts</property>
+-              </object>
+-              <packing>
+-                <property name="position">1</property>
+-                <property name="tab_fill">False</property>
+-              </packing>
+-            </child>
+           </object>
+           <packing>
+-            <property name="position">2</property>
++            <property name="position">1</property>
+           </packing>
+         </child>
+         <child internal-child="action_area">
+-          <object class="GtkHButtonBox" id="dialog-action_area1">
++          <object class="GtkHButtonBox" id="dialog-action_area13">
+             <property name="visible">True</property>
+             <property name="layout_style">end</property>
+             <child>
+@@ -683,20 +754,7 @@
+               </packing>
+             </child>
+             <child>
+-              <object class="GtkButton" id="delete_button">
+-                <property name="label" translatable="yes">_Delete Location</property>
+-                <property name="visible">True</property>
+-                <property name="sensitive">False</property>
+-                <property name="can_focus">True</property>
+-                <property name="receives_default">False</property>
+-                <property name="image">delete_button_img</property>
+-                <property name="use_underline">True</property>
+-              </object>
+-              <packing>
+-                <property name="expand">False</property>
+-                <property name="fill">False</property>
+-                <property name="position">1</property>
+-              </packing>
++              <placeholder/>
+             </child>
+             <child>
+               <object class="GtkButton" id="closebutton1">
+@@ -724,7 +782,6 @@
+     </child>
+     <action-widgets>
+       <action-widget response="-11">helpbutton1</action-widget>
+-      <action-widget response="0">delete_button</action-widget>
+       <action-widget response="-7">closebutton1</action-widget>
+     </action-widgets>
+   </object>
+@@ -737,20 +794,31 @@
+     <child internal-child="vbox">
+       <object class="GtkVBox" id="dialog-vbox2">
+         <property name="visible">True</property>
++        <property name="orientation">vertical</property>
+         <property name="spacing">2</property>
+         <child>
+           <object class="GtkVBox" id="vbox3">
+             <property name="visible">True</property>
+             <property name="border_width">5</property>
++            <property name="orientation">vertical</property>
+             <property name="spacing">6</property>
+             <child>
+               <object class="GtkCheckButton" id="use_auth_checkbutton">
+-                <property name="label" translatable="yes">&lt;b&gt;_Use authentication&lt;/b&gt;</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">False</property>
+                 <property name="use_underline">True</property>
+                 <property name="draw_indicator">True</property>
++                <child>
++                  <object class="GtkLabel" id="label1">
++                    <property name="visible">True</property>
++                    <property name="label" translatable="yes">_Use authentication</property>
++                    <property name="use_underline">True</property>
++                    <attributes>
++                      <attribute name="weight" value="bold"/>
++                    </attributes>
++                  </object>
++                </child>
+               </object>
+               <packing>
+                 <property name="expand">False</property>
+@@ -759,7 +827,7 @@
+               </packing>
+             </child>
+             <child>
+-              <object class="GtkHBox" id="hbox3">
++              <object class="GtkHBox" id="hbox33">
+                 <property name="visible">True</property>
+                 <child>
+                   <object class="GtkLabel" id="label19">
+@@ -905,14 +973,15 @@
+     <property name="type_hint">dialog</property>
+     <property name="has_separator">False</property>
+     <child internal-child="vbox">
+-      <object class="GtkVBox" id="dialog-vbox1">
++      <object class="GtkVBox" id="dialog-vbox31">
+         <property name="visible">True</property>
++        <property name="orientation">vertical</property>
+         <property name="homogeneous">True</property>
+         <child>
+           <object class="GtkHBox" id="hbox5">
+             <property name="visible">True</property>
+             <child>
+-              <object class="GtkLabel" id="label19">
++              <object class="GtkLabel" id="label89">
+                 <property name="visible">True</property>
+                 <property name="label" translatable="yes">_Location name:</property>
+                 <property name="use_underline">True</property>
+@@ -937,6 +1006,8 @@
+             </child>
+           </object>
+           <packing>
++            <property name="expand">False</property>
++            <property name="fill">False</property>
+             <property name="position">1</property>
+           </packing>
+         </child>
+@@ -945,6 +1016,8 @@
+             <property name="label" translatable="yes">The location already exists.</property>
+           </object>
+           <packing>
++            <property name="expand">False</property>
++            <property name="fill">False</property>
+             <property name="position">2</property>
+           </packing>
+         </child>
+@@ -953,13 +1026,12 @@
+             <property name="visible">True</property>
+             <property name="layout_style">end</property>
+             <child>
+-              <object class="GtkButton" id="new_location">
+-                <property name="label" translatable="yes">C_reate</property>
++              <object class="GtkButton" id="button1">
++                <property name="label">gtk-cancel</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+-                <property name="image">new_location_btn_img</property>
+-                <property name="use_underline">True</property>
++                <property name="use_stock">True</property>
+               </object>
+               <packing>
+                 <property name="expand">False</property>
+@@ -968,12 +1040,13 @@
+               </packing>
+             </child>
+             <child>
+-              <object class="GtkButton" id="button2">
+-                <property name="label">gtk-cancel</property>
++              <object class="GtkButton" id="new_location">
++                <property name="label" translatable="yes">C_reate</property>
+                 <property name="visible">True</property>
+                 <property name="can_focus">True</property>
+                 <property name="receives_default">True</property>
+-                <property name="use_stock">True</property>
++                <property name="image">new_location_btn_img</property>
++                <property name="use_underline">True</property>
+               </object>
+               <packing>
+                 <property name="expand">False</property>
+@@ -992,8 +1065,8 @@
+       </object>
+     </child>
+     <action-widgets>
++      <action-widget response="0">button1</action-widget>
+       <action-widget response="-5">new_location</action-widget>
+-      <action-widget response="-6">button2</action-widget>
+     </action-widgets>
+   </object>
+   <object class="GtkAdjustment" id="adjustment1">
+diff --git a/capplets/network/network-module.c b/capplets/network/network-module.c
+new file mode 100644
+index 0000000..18975e6
+--- /dev/null
++++ b/capplets/network/network-module.c
+@@ -0,0 +1,42 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#include <config.h>
++
++#include <glib.h>
++#include <glib/gi18n-lib.h>
++#include <gmodule.h>
++#include <gio/gio.h>
++
++#include "cc-network-panel.h"
++
++void
++g_io_module_load (GIOModule *module)
++{
++  bindtextdomain (GETTEXT_PACKAGE, GNOMELOCALEDIR);
++  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
++
++  cc_network_panel_register (module);
++}
++
++void
++g_io_module_unload (GIOModule *module)
++{
++}
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index 3117ac8..798718c 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -78,6 +78,7 @@ capplets/mouse/gnome-mouse-accessibility.c
+ capplets/mouse/gnome-mouse-properties.c
+ [type: gettext/glade]capplets/mouse/gnome-mouse-properties.ui
+ capplets/mouse/gnome-settings-mouse.desktop.in.in
++capplets/network/cc-network-panel.c
+ capplets/network/gnome-network-properties.c
+ capplets/network/gnome-network-properties.desktop.in.in
+ [type: gettext/glade]capplets/network/gnome-network-properties.ui
+-- 
+1.7.2.3
+

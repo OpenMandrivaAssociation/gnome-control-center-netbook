@@ -1,0 +1,617 @@
+From 9120f7693c74ea1ddb773a16be740381a4f51df4 Mon Sep 17 00:00:00 2001
+From: Thomas Wood <thomas.wood@intel.com>
+Date: Thu, 26 Aug 2010 15:34:15 +0100
+Subject: [PATCH 02/13] Add Appearance settings panel
+
+---
+ capplets/appearance/Makefile.am           |   50 ++++++++-
+ capplets/appearance/appearance-desktop.c  |    7 +
+ capplets/appearance/appearance-module.c   |   42 +++++++
+ capplets/appearance/cc-appearance-panel.c |  184 +++++++++++++++++++++++++++++
+ capplets/appearance/cc-appearance-panel.h |   54 +++++++++
+ capplets/appearance/data/appearance.ui    |   59 +++++-----
+ po/POTFILES.in                            |    1 +
+ 7 files changed, 368 insertions(+), 29 deletions(-)
+ create mode 100644 capplets/appearance/appearance-module.c
+ create mode 100644 capplets/appearance/cc-appearance-panel.c
+ create mode 100644 capplets/appearance/cc-appearance-panel.h
+
+diff --git a/capplets/appearance/Makefile.am b/capplets/appearance/Makefile.am
+index cc42f54..7058368 100644
+--- a/capplets/appearance/Makefile.am
++++ b/capplets/appearance/Makefile.am
+@@ -29,7 +29,55 @@ gnome_appearance_properties_SOURCES = \
+ 	theme-util.c \
+ 	theme-util.h
+ 
+-AM_CFLAGS = -DGNOME_DESKTOP_USE_UNSTABLE_API
++
++ccmodulesdir = $(EXTENSIONSDIR)
++ccmodules_LTLIBRARIES = libappearance.la
++
++libappearance_la_SOURCES =		\
++	appearance.h \
++	appearance-desktop.c \
++	appearance-desktop.h \
++	appearance-font.c \
++	appearance-font.h \
++	appearance-main.c \
++	appearance-themes.c \
++	appearance-themes.h \
++	appearance-style.c \
++	appearance-style.h \
++	gnome-wp-info.c \
++	gnome-wp-info.h \
++	gnome-wp-item.c \
++	gnome-wp-item.h \
++	gnome-wp-xml.c \
++	gnome-wp-xml.h \
++	theme-installer.c \
++	theme-installer.h \
++	theme-save.c \
++	theme-save.h \
++	theme-util.c \
++	theme-util.h \
++	appearance-module.c		\
++	cc-appearance-panel.h		\
++	cc-appearance-panel.c \
++	$(NULL)
++
++libappearance_la_LDFLAGS =		\
++	$(EXTENSION_LIBTOOL_FLAGS)	\
++	$(NULL)
++
++libappearance_la_LIBADD =		\
++	$(EXTENSION_LIBS)		\
++	$(FONT_CAPPLET_LIBS)		\
++	$(EXTENSION_COMMON_LIBS)	\
++	$(NULL)
++
++libappearance_la_CFLAGS =		\
++	$(EXTENSION_CFLAGS)		\
++	$(EXTENSION_COMMON_CFLAGS)	\
++	$(NULL)
++
++libappearance_la_LIBTOOLFLAGS = --tag=disable-static
++
+ 
+ gnome_appearance_properties_LDADD = \
+ 	$(top_builddir)/libwindow-settings/libgnome-window-settings.la \
+diff --git a/capplets/appearance/appearance-desktop.c b/capplets/appearance/appearance-desktop.c
+index 2ae6bd6..3c5e82e 100644
+--- a/capplets/appearance/appearance-desktop.c
++++ b/capplets/appearance/appearance-desktop.c
+@@ -1034,6 +1034,13 @@ static void
+ wp_select_after_realize (GtkWidget *widget,
+                          AppearanceData *data)
+ {
++  static gboolean setup_done = FALSE;
++
++  if (setup_done)
++    return;
++
++  setup_done = TRUE;
++
+   GnomeWPItem *item;
+ 
+   g_idle_add (wp_load_stuffs, data);
+diff --git a/capplets/appearance/appearance-module.c b/capplets/appearance/appearance-module.c
+new file mode 100644
+index 0000000..8aae2fd
+--- /dev/null
++++ b/capplets/appearance/appearance-module.c
+@@ -0,0 +1,42 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#include <config.h>
++
++#include <glib.h>
++#include <glib/gi18n-lib.h>
++#include <gmodule.h>
++#include <gio/gio.h>
++
++#include "cc-appearance-panel.h"
++
++void
++g_io_module_load (GIOModule *module)
++{
++  bindtextdomain (GETTEXT_PACKAGE, GNOMELOCALEDIR);
++  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
++
++  cc_appearance_panel_register (module);
++}
++
++void
++g_io_module_unload (GIOModule *module)
++{
++}
+diff --git a/capplets/appearance/cc-appearance-panel.c b/capplets/appearance/cc-appearance-panel.c
+new file mode 100644
+index 0000000..8f5b9f9
+--- /dev/null
++++ b/capplets/appearance/cc-appearance-panel.c
+@@ -0,0 +1,184 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ * Copyright (C) 2010 Intel, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#include "config.h"
++
++#include "cc-appearance-panel.h"
++#include "appearance.h"
++#include "appearance-desktop.h"
++#include "appearance-font.h"
++#include "appearance-themes.h"
++#include "appearance-style.h"
++#include "theme-installer.h"
++#include "theme-thumbnail.h"
++#include "activate-settings-daemon.h"
++#include "capplet-util.h"
++
++#include <stdlib.h>
++#include <stdio.h>
++
++#include <gtk/gtk.h>
++#include <gio/gio.h>
++#include <glib/gi18n-lib.h>
++
++#include <libgnomeui/gnome-desktop-thumbnail.h>
++
++#define CC_APPEARANCE_PANEL_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), CC_TYPE_APPEARANCE_PANEL, CcAppearancePanelPrivate))
++
++#define WID(s) GTK_WIDGET (gtk_builder_get_object (builder, s))
++
++struct CcAppearancePanelPrivate
++{
++        GtkWidget *notebook;
++        AppearanceData *data;
++};
++
++enum {
++        PROP_0,
++};
++
++static void     cc_appearance_panel_class_init     (CcAppearancePanelClass *klass);
++static void     cc_appearance_panel_init           (CcAppearancePanel      *appearance_panel);
++static void     cc_appearance_panel_finalize       (GObject             *object);
++
++G_DEFINE_DYNAMIC_TYPE (CcAppearancePanel, cc_appearance_panel, CC_TYPE_PANEL)
++
++static void
++setup_panel (CcAppearancePanel *panel,
++             gboolean           is_active)
++{
++        static gboolean setup_done = FALSE;
++
++        if (is_active && !setup_done)
++        {
++                AppearanceData *data;
++                GtkWidget *w;
++                gchar *uifile;
++                GtkBuilder *ui;
++                GError *err = NULL;
++                gchar *objects[] = {"render_details", "main_notebook", "wp_style_liststore",
++                        "wp_color_liststore", "toolbar_style_liststore", NULL};
++
++                /* set up the data */
++                uifile = g_build_filename (GNOMECC_GTKBUILDER_DIR, "appearance.ui",
++                                NULL);
++                ui = gtk_builder_new ();
++                gtk_builder_add_objects_from_file (ui, uifile, objects, &err);
++                g_free (uifile);
++
++                if (err)
++                {
++                        g_warning (_("Could not load user interface file: %s"), err->message);
++                        g_error_free (err);
++                        g_object_unref (ui);
++                }
++                else
++                {
++                        data = g_new (AppearanceData, 1);
++                        data->client = gconf_client_get_default ();
++                        data->ui = ui;
++                        data->thumb_factory = gnome_desktop_thumbnail_factory_new (GNOME_DESKTOP_THUMBNAIL_SIZE_NORMAL);
++                }
++
++                /* init tabs */
++                desktop_init (data, NULL);
++                font_init (data);
++
++                /* prepare the main window */
++                w = appearance_capplet_get_widget (data, "main_notebook");
++                gtk_widget_show_all (w);
++                gtk_container_add (GTK_CONTAINER (panel), w);
++
++                w = appearance_capplet_get_widget (data, "theme_vbox");
++                gtk_widget_destroy (w);
++
++                setup_done = TRUE;
++        }
++}
++
++static GObject *
++cc_appearance_panel_constructor (GType                  type,
++                               guint                  n_construct_properties,
++                               GObjectConstructParam *construct_properties)
++{
++        CcAppearancePanel      *appearance_panel;
++
++        appearance_panel = CC_APPEARANCE_PANEL (G_OBJECT_CLASS (cc_appearance_panel_parent_class)->constructor (type,
++                                                                                                                n_construct_properties,
++                                                                                                                construct_properties));
++
++        g_object_set (appearance_panel,
++                      "display-name", _("Appearance"),
++                      "id", "gnome-appearance-properties.desktop",
++                      NULL);
++
++        return G_OBJECT (appearance_panel);
++}
++
++static void
++cc_appearance_panel_class_init (CcAppearancePanelClass *klass)
++{
++        GObjectClass  *object_class = G_OBJECT_CLASS (klass);
++
++        object_class->constructor = cc_appearance_panel_constructor;
++        object_class->finalize = cc_appearance_panel_finalize;
++
++        g_type_class_add_private (klass, sizeof (CcAppearancePanelPrivate));
++}
++
++static void
++cc_appearance_panel_class_finalize (CcAppearancePanelClass *klass)
++{
++}
++
++static void
++cc_appearance_panel_init (CcAppearancePanel *panel)
++{
++        panel->priv = CC_APPEARANCE_PANEL_GET_PRIVATE (panel);
++
++        g_signal_connect (panel, "active-changed", G_CALLBACK (setup_panel),
++                          NULL);
++}
++
++static void
++cc_appearance_panel_finalize (GObject *object)
++{
++        CcAppearancePanel *appearance_panel;
++
++        g_return_if_fail (object != NULL);
++        g_return_if_fail (CC_IS_APPEARANCE_PANEL (object));
++
++        appearance_panel = CC_APPEARANCE_PANEL (object);
++
++        g_return_if_fail (appearance_panel->priv != NULL);
++
++        G_OBJECT_CLASS (cc_appearance_panel_parent_class)->finalize (object);
++}
++
++void
++cc_appearance_panel_register (GIOModule *module)
++{
++        cc_appearance_panel_register_type (G_TYPE_MODULE (module));
++        g_io_extension_point_implement (CC_PANEL_EXTENSION_POINT_NAME,
++                                        CC_TYPE_APPEARANCE_PANEL,
++                                        "appearance",
++                                        10);
++}
+diff --git a/capplets/appearance/cc-appearance-panel.h b/capplets/appearance/cc-appearance-panel.h
+new file mode 100644
+index 0000000..c27629c
+--- /dev/null
++++ b/capplets/appearance/cc-appearance-panel.h
+@@ -0,0 +1,54 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#ifndef __CC_APPEARANCE_PANEL_H
++#define __CC_APPEARANCE_PANEL_H
++
++#include <gtk/gtk.h>
++#include "cc-panel.h"
++
++G_BEGIN_DECLS
++
++#define CC_TYPE_APPEARANCE_PANEL         (cc_appearance_panel_get_type ())
++#define CC_APPEARANCE_PANEL(o)           (G_TYPE_CHECK_INSTANCE_CAST ((o), CC_TYPE_APPEARANCE_PANEL, CcAppearancePanel))
++#define CC_APPEARANCE_PANEL_CLASS(k)     (G_TYPE_CHECK_CLASS_CAST((k), CC_TYPE_APPEARANCE_PANEL, CcAppearancePanelClass))
++#define CC_IS_APPEARANCE_PANEL(o)        (G_TYPE_CHECK_INSTANCE_TYPE ((o), CC_TYPE_APPEARANCE_PANEL))
++#define CC_IS_APPEARANCE_PANEL_CLASS(k)  (G_TYPE_CHECK_CLASS_TYPE ((k), CC_TYPE_APPEARANCE_PANEL))
++#define CC_APPEARANCE_PANEL_GET_CLASS(o) (G_TYPE_INSTANCE_GET_CLASS ((o), CC_TYPE_APPEARANCE_PANEL, CcAppearancePanelClass))
++
++typedef struct CcAppearancePanelPrivate CcAppearancePanelPrivate;
++
++typedef struct
++{
++        CcPanel                 parent;
++        CcAppearancePanelPrivate *priv;
++} CcAppearancePanel;
++
++typedef struct
++{
++        CcPanelClass   parent_class;
++} CcAppearancePanelClass;
++
++GType              cc_appearance_panel_get_type   (void);
++void               cc_appearance_panel_register   (GIOModule         *module);
++
++G_END_DECLS
++
++#endif /* __CC_APPEARANCE_PANEL_H */
+diff --git a/capplets/appearance/data/appearance.ui b/capplets/appearance/data/appearance.ui
+index 3ba17b3..751cb11 100644
+--- a/capplets/appearance/data/appearance.ui
++++ b/capplets/appearance/data/appearance.ui
+@@ -14,7 +14,7 @@
+         <property name="orientation">vertical</property>
+         <property name="spacing">2</property>
+         <child>
+-          <object class="GtkVBox" id="vbox7">
++          <object class="GtkVBox" id="render_details_vbox">
+             <property name="visible">True</property>
+             <property name="border_width">5</property>
+             <property name="orientation">vertical</property>
+@@ -892,7 +892,7 @@
+                     </child>
+                     <child>
+                       <object class="GtkHBox" id="hbox8">
+-                        <property name="visible">True</property>
++                        <property name="no_show_all">True</property>
+                         <property name="spacing">24</property>
+                         <child>
+                           <object class="GtkHBox" id="hbox_style">
+@@ -1034,7 +1034,7 @@
+                 </child>
+                 <child>
+                   <object class="GtkLabel" id="label2">
+-                    <property name="visible">True</property>
++                    <property name="no_show_all">True</property>
+                   </object>
+                   <packing>
+                     <property name="expand">False</property>
+@@ -1048,7 +1048,6 @@
+                     <child>
+                       <object class="GtkLinkButton" id="more_backgrounds_linkbutton">
+                         <property name="label" translatable="yes">Get more backgrounds online</property>
+-                        <property name="visible">True</property>
+                         <property name="can_focus">True</property>
+                         <property name="receives_default">True</property>
+                         <property name="no_show_all">True</property>
+@@ -1129,7 +1128,7 @@
+               </packing>
+             </child>
+             <child>
+-              <object class="GtkVBox" id="fonts_vbox">
++              <object class="GtkVBox" id="font_vbox">
+                 <property name="visible">True</property>
+                 <property name="border_width">12</property>
+                 <property name="orientation">vertical</property>
+@@ -1174,32 +1173,32 @@
+                     </child>
+                     <child>
+                       <object class="GtkFontButton" id="desktop_font">
+-                        <property name="visible">True</property>
+                         <property name="can_focus">True</property>
+                         <property name="receives_default">False</property>
++                        <property name="no_show_all">True</property>
+                         <property name="use_font">True</property>
+                       </object>
+                       <packing>
+                         <property name="left_attach">1</property>
+                         <property name="right_attach">2</property>
+-                        <property name="top_attach">2</property>
+-                        <property name="bottom_attach">3</property>
++                        <property name="top_attach">3</property>
++                        <property name="bottom_attach">4</property>
+                         <property name="x_options">GTK_FILL</property>
+                         <property name="y_options"></property>
+                       </packing>
+                     </child>
+                     <child>
+                       <object class="GtkFontButton" id="window_title_font">
+-                        <property name="visible">True</property>
+                         <property name="can_focus">True</property>
+                         <property name="receives_default">False</property>
++                        <property name="no_show_all">True</property>
+                         <property name="use_font">True</property>
+                       </object>
+                       <packing>
+                         <property name="left_attach">1</property>
+                         <property name="right_attach">2</property>
+-                        <property name="top_attach">3</property>
+-                        <property name="bottom_attach">4</property>
++                        <property name="top_attach">4</property>
++                        <property name="bottom_attach">5</property>
+                         <property name="x_options">GTK_FILL</property>
+                         <property name="y_options"></property>
+                       </packing>
+@@ -1214,15 +1213,15 @@
+                       <packing>
+                         <property name="left_attach">1</property>
+                         <property name="right_attach">2</property>
+-                        <property name="top_attach">4</property>
+-                        <property name="bottom_attach">5</property>
++                        <property name="top_attach">2</property>
++                        <property name="bottom_attach">3</property>
+                         <property name="x_options">GTK_FILL</property>
+                         <property name="y_options"></property>
+                       </packing>
+                     </child>
+                     <child>
+                       <object class="GtkLabel" id="label31">
+-                        <property name="visible">True</property>
++                        <property name="no_show_all">True</property>
+                         <property name="xalign">0</property>
+                         <property name="label" translatable="yes">Des_ktop font:</property>
+                         <property name="use_underline">True</property>
+@@ -1230,15 +1229,15 @@
+                         <property name="mnemonic_widget">desktop_font</property>
+                       </object>
+                       <packing>
+-                        <property name="top_attach">2</property>
+-                        <property name="bottom_attach">3</property>
++                        <property name="top_attach">3</property>
++                        <property name="bottom_attach">4</property>
+                         <property name="x_options">GTK_FILL</property>
+                         <property name="y_options"></property>
+                       </packing>
+                     </child>
+                     <child>
+                       <object class="GtkLabel" id="label30">
+-                        <property name="visible">True</property>
++                        <property name="no_show_all">True</property>
+                         <property name="xalign">0</property>
+                         <property name="label" translatable="yes">_Window title font:</property>
+                         <property name="use_underline">True</property>
+@@ -1246,8 +1245,8 @@
+                         <property name="mnemonic_widget">window_title_font</property>
+                       </object>
+                       <packing>
+-                        <property name="top_attach">3</property>
+-                        <property name="bottom_attach">4</property>
++                        <property name="top_attach">4</property>
++                        <property name="bottom_attach">5</property>
+                         <property name="x_options">GTK_FILL</property>
+                         <property name="y_options"></property>
+                       </packing>
+@@ -1262,8 +1261,8 @@
+                         <property name="mnemonic_widget">monospace_font</property>
+                       </object>
+                       <packing>
+-                        <property name="top_attach">4</property>
+-                        <property name="bottom_attach">5</property>
++                        <property name="top_attach">2</property>
++                        <property name="bottom_attach">3</property>
+                         <property name="x_options">GTK_FILL</property>
+                         <property name="y_options"></property>
+                       </packing>
+@@ -1625,9 +1624,6 @@
+       <row>
+         <col id="0" translatable="yes">Stretch</col>
+       </row>
+-      <row>
+-        <col id="0" translatable="yes">Span</col>
+-      </row>
+     </data>
+   </object>
+   <object class="GtkListStore" id="wp_color_liststore">
+@@ -1681,7 +1677,7 @@
+         <property name="orientation">vertical</property>
+         <property name="spacing">2</property>
+         <child>
+-          <object class="GtkNotebook" id="notebook2">
++          <object class="GtkNotebook" id="theme_details_notebook">
+             <property name="visible">True</property>
+             <property name="can_focus">True</property>
+             <property name="events">GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</property>
+@@ -1776,6 +1772,7 @@
+                 <child>
+                   <object class="GtkHBox" id="color_scheme_message_hbox">
+                     <property name="events">GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</property>
++                    <property name="no_show_all">True</property>
+                     <property name="spacing">6</property>
+                     <child>
+                       <object class="GtkImage" id="image2">
+@@ -2302,7 +2299,10 @@
+                             <property name="visible">True</property>
+                             <property name="events">GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</property>
+                             <property name="label" translatable="yes">Small</property>
+-                            <property name="use_markup">True</property>
++                            <attributes>
++                              <attribute name="style" value="normal"/>
++                              <attribute name="scale" value="0.833000"/>
++                            </attributes>
+                           </object>
+                           <packing>
+                             <property name="expand">False</property>
+@@ -2327,7 +2327,10 @@
+                             <property name="visible">True</property>
+                             <property name="events">GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</property>
+                             <property name="label" translatable="yes">Large</property>
+-                            <property name="use_markup">True</property>
++                            <attributes>
++                              <attribute name="style" value="normal"/>
++                              <attribute name="scale" value="0.833000"/>
++                            </attributes>
+                           </object>
+                           <packing>
+                             <property name="expand">False</property>
+@@ -2454,7 +2457,7 @@
+         <property name="orientation">vertical</property>
+         <property name="spacing">2</property>
+         <child>
+-          <object class="GtkTable" id="table3">
++          <object class="GtkTable" id="save_dialog_table">
+             <property name="visible">True</property>
+             <property name="border_width">6</property>
+             <property name="n_rows">3</property>
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index aa0a9e4..ae9fbfe 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -21,6 +21,7 @@ capplets/appearance/appearance-main.c
+ capplets/appearance/appearance-style.c
+ capplets/appearance/appearance-themes.c
+ [type: gettext/glade]capplets/appearance/data/appearance.ui
++capplets/appearance/cc-appearance-panel.c
+ capplets/appearance/data/gnome-appearance-properties.desktop.in.in
+ capplets/appearance/data/gnome-theme-installer.desktop.in.in
+ capplets/appearance/data/gnome-theme-package.xml.in
+-- 
+1.7.2.3
+

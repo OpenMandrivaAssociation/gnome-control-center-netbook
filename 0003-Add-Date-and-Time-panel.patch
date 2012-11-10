@@ -1,0 +1,355 @@
+From e970560ed87ec521b715a3a0d7c23614eb1e37de Mon Sep 17 00:00:00 2001
+From: Thomas Wood <thomas.wood@intel.com>
+Date: Thu, 26 Aug 2010 14:50:20 +0100
+Subject: [PATCH 03/13] Add Date and Time panel
+
+---
+ capplets/Makefile.am          |    4 +-
+ capplets/date/Makefile.am     |   29 ++++++++
+ capplets/date/cc-date-panel.c |  158 +++++++++++++++++++++++++++++++++++++++++
+ capplets/date/cc-date-panel.h |   55 ++++++++++++++
+ capplets/date/lib.c           |   34 +++++++++
+ configure.ac                  |    1 +
+ 6 files changed, 280 insertions(+), 1 deletions(-)
+ create mode 100644 capplets/date/Makefile.am
+ create mode 100644 capplets/date/cc-date-panel.c
+ create mode 100644 capplets/date/cc-date-panel.h
+ create mode 100644 capplets/date/lib.c
+
+diff --git a/capplets/Makefile.am b/capplets/Makefile.am
+index 004d00f..a599573 100644
+--- a/capplets/Makefile.am
++++ b/capplets/Makefile.am
+@@ -8,7 +8,8 @@ SUBDIRS = \
+ 	keyboard		\
+ 	mouse			\
+ 	network			\
+-	windows
++	windows			\
++	date
+ 
+ DIST_SUBDIRS = \
+ 	common			\
+@@ -21,6 +22,7 @@ DIST_SUBDIRS = \
+ 	network			\
+ 	windows			\
+ 	display 		\
++	date			\
+ 	about-me
+ 
+ 
+diff --git a/capplets/date/Makefile.am b/capplets/date/Makefile.am
+new file mode 100644
+index 0000000..e333a78
+--- /dev/null
++++ b/capplets/date/Makefile.am
+@@ -0,0 +1,29 @@
++INCLUDES = 						\
++	$(GNOMECC_CAPPLETS_CFLAGS)			\
++	-I$(top_srcdir)/libgnome-control-center-extension	\
++	-DGNOMELOCALEDIR="\"$(datadir)/locale\""	\
++	-DGNOMECC_DATA_DIR="\"$(pkgdatadir)\""		\
++	-DGNOMECC_UI_DIR="\"$(uidir)\""
++
++AM_CPPFLAGS = \
++	-DPACKAGE_LOCALE_DIR=\""$(prefix)/$(DATADIRNAME)/locale"\" \
++	-DPACKAGE_SRC_DIR=\""$(srcdir)"\" \
++	-DPACKAGE_DATA_DIR=\""$(datadir)"\" $(PANEL_CFLAGS)
++
++AM_CFLAGS = $(EXTENSION_CFLAGS) $(EXTENSION_COMMON_CFLAGS)
++
++libdir = $(EXTENSIONSDIR)
++lib_LTLIBRARIES = libdate.la
++
++
++libdate_la_SOURCES =     \
++	lib.c                \
++	cc-date-panel.h  \
++	cc-date-panel.c
++
++libdate_la_LDFLAGS = $(EXTENSION_LIBTOOL_FLAGS)
++
++libdate_la_LIBADD = $(EXTENSION_LIBS) $(EXTENSION_COMMON_LIBS)
++
++
++-include $(top_srcdir)/git.mk
+diff --git a/capplets/date/cc-date-panel.c b/capplets/date/cc-date-panel.c
+new file mode 100644
+index 0000000..5fd6851
+--- /dev/null
++++ b/capplets/date/cc-date-panel.c
+@@ -0,0 +1,158 @@
++/*
++ * date-panels
++ * Copyright (C) 2010 Intel Corporation
++ * 
++ * date-panels is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ * 
++ * date-panels is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "cc-date-panel.h"
++
++G_DEFINE_DYNAMIC_TYPE (CcDatePanel, cc_date_panel, CC_TYPE_PANEL);
++
++static void
++map (GtkWidget       *socket)
++{
++  gchar *command;
++  GError *err = NULL;
++  static GdkNativeWindow win = 0;
++  GdkNativeWindow new_win;
++  
++  g_debug ("map");
++
++  new_win = gtk_socket_get_id (GTK_SOCKET (socket));
++
++  /* map is called multiple times */
++  if (new_win == win)
++    return;
++  win = new_win;
++
++  command = g_strdup_printf ("system-config-date --socket %d", win);
++
++
++  g_debug ("Running %s", command);
++  g_spawn_command_line_async (command, &err);
++
++  if (err)
++    {
++      g_warning ("Error loading system-config-date: %s", err->message);
++      g_error_free (err);
++    }
++}
++
++static gboolean
++plug_removed (GtkSocket *socket,
++              CcPanel   *panel)
++{
++  CcShell *shell;
++
++  shell = cc_panel_get_shell (panel);
++
++  cc_shell_set_panel (shell, NULL);
++
++  return FALSE;
++}
++
++static void
++active_changed_cb (CcDatePanel *panel,
++                   gboolean     is_active,
++                   gpointer    *data)
++{
++  if (is_active)
++    {
++      GtkWidget *viewport;
++
++      panel->scrolled = gtk_scrolled_window_new (NULL, NULL);
++      gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (panel->scrolled),
++                                      GTK_POLICY_AUTOMATIC,
++                                      GTK_POLICY_AUTOMATIC);
++      gtk_container_add (GTK_CONTAINER (panel), panel->scrolled);
++
++      viewport = gtk_viewport_new (NULL, NULL);
++      gtk_viewport_set_shadow_type (GTK_VIEWPORT (viewport), GTK_SHADOW_NONE);
++      gtk_container_add (GTK_CONTAINER (panel->scrolled), viewport);
++
++      panel->socket = gtk_socket_new ();
++      gtk_container_add (GTK_CONTAINER (viewport), panel->socket);
++
++
++      g_signal_connect (panel->socket, "map", G_CALLBACK (map), NULL);
++      g_signal_connect (panel->socket, "plug-removed",
++                        G_CALLBACK (plug_removed), panel);
++
++      gtk_widget_show_all (panel->scrolled);
++    }
++  else
++    {
++      gtk_widget_destroy (panel->scrolled);
++      panel->socket = NULL;
++      panel->scrolled = NULL;
++    }
++
++}
++
++static void
++cc_date_panel_init (CcDatePanel *object)
++{
++  g_signal_connect (object, "active-changed", G_CALLBACK (active_changed_cb),
++                    NULL);
++  object->socket = NULL;
++}
++
++static void
++cc_date_panel_finalize (GObject *object)
++{
++  G_OBJECT_CLASS (cc_date_panel_parent_class)->finalize (object);
++}
++
++static GObject*
++cc_date_panel_constructor (GType                  type,
++                               guint                  n_construct_properties,
++                               GObjectConstructParam *construct_properties)
++{
++  CcDatePanel *date_panel;
++
++  date_panel = CC_DATE_PANEL (G_OBJECT_CLASS (cc_date_panel_parent_class)->constructor (type,
++                                                                                                  n_construct_properties,
++                                                                                                  construct_properties));
++  g_object_set (date_panel,
++                "display-name", ("Date"),
++                "id","system-config-date.desktop",
++                NULL);
++
++  return G_OBJECT (date_panel);
++}
++
++static void
++cc_date_panel_class_init (CcDatePanelClass *klass)
++{
++  GObjectClass* object_class = G_OBJECT_CLASS (klass);
++
++  object_class->finalize = cc_date_panel_finalize;
++  object_class->constructor = cc_date_panel_constructor;
++}
++
++static void
++cc_date_panel_class_finalize (CcDatePanelClass *klass)
++{
++}
++
++void
++cc_date_panel_register (GIOModule *module)
++{
++  cc_date_panel_register_type (G_TYPE_MODULE (module));
++  g_io_extension_point_implement (CC_PANEL_EXTENSION_POINT_NAME,
++                                  CC_TYPE_DATE_PANEL,
++                                  "date",
++                                  10);
++}
+diff --git a/capplets/date/cc-date-panel.h b/capplets/date/cc-date-panel.h
+new file mode 100644
+index 0000000..7863d33
+--- /dev/null
++++ b/capplets/date/cc-date-panel.h
+@@ -0,0 +1,55 @@
++/*
++ * date-panels
++ * Copyright (C) 2010 Intel Corporation
++ * 
++ * date-panels is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ * 
++ * date-panels is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef _CC_DATE_PANEL_H_
++#define _CC_DATE_PANEL_H_
++
++#include <glib-object.h>
++#include "cc-panel.h"
++
++G_BEGIN_DECLS
++
++#define CC_TYPE_DATE_PANEL             (cc_date_panel_get_type ())
++#define CC_DATE_PANEL(obj)             (G_TYPE_CHECK_INSTANCE_CAST ((obj), CC_TYPE_DATE_PANEL, CcDatePanel))
++#define CC_DATE_PANEL_CLASS(klass)     (G_TYPE_CHECK_CLASS_CAST ((klass), CC_TYPE_DATE_PANEL, CcDatePanelClass))
++#define CC_IS_DATE_PANEL(obj)          (G_TYPE_CHECK_INSTANCE_TYPE ((obj), CC_TYPE_DATE_PANEL))
++#define CC_IS_DATE_PANEL_CLASS(klass)  (G_TYPE_CHECK_CLASS_TYPE ((klass), CC_TYPE_DATE_PANEL))
++#define CC_DATE_PANEL_GET_CLASS(obj)   (G_TYPE_INSTANCE_GET_CLASS ((obj), CC_TYPE_DATE_PANEL, CcDatePanelClass))
++
++typedef struct _CcDatePanelClass CcDatePanelClass;
++typedef struct _CcDatePanel CcDatePanel;
++
++struct _CcDatePanelClass
++{
++  CcPanelClass parent_class;
++};
++
++struct _CcDatePanel
++{
++  CcPanel parent_instance;
++
++  GtkWidget *socket;
++  GtkWidget *scrolled;
++};
++
++GType cc_date_panel_get_type (void) G_GNUC_CONST;
++void cc_date_panel_register (GIOModule *module);
++
++G_END_DECLS
++
++#endif /* _CC_DATE_PANEL_H_ */
+diff --git a/capplets/date/lib.c b/capplets/date/lib.c
+new file mode 100644
+index 0000000..4b5382a
+--- /dev/null
++++ b/capplets/date/lib.c
+@@ -0,0 +1,34 @@
++/*
++ * lib.c
++ * Copyright (C) 2010 Intel Corporation
++ * 
++ * date-panels is free software: you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ * 
++ * date-panels is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details.
++ * 
++ * You should have received a copy of the GNU General Public License along
++ * with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <config.h>
++#include <stdio.h>
++#include <gio/gio.h>
++
++#include "cc-date-panel.h"
++
++void
++g_io_module_load (GIOModule *module)
++{
++  cc_date_panel_register (module);
++}
++
++void
++g_io_module_unload (GIOModule *module)
++{
++}
+diff --git a/configure.ac b/configure.ac
+index 4cbebc5..60ffe47 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -372,6 +372,7 @@ capplets/network/Makefile
+ capplets/network/gnome-network-properties.desktop.in
+ capplets/windows/Makefile
+ capplets/windows/window-properties.desktop.in
++capplets/date/Makefile
+ font-viewer/Makefile
+ font-viewer/gnome-font-viewer.desktop.in
+ help/Makefile
+-- 
+1.7.2.3
+

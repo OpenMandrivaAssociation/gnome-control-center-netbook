@@ -1,0 +1,1934 @@
+From 5794d6bdbc54c1792ac24fda79177de36a662845 Mon Sep 17 00:00:00 2001
+From: Thomas Wood <thomas.wood@intel.com>
+Date: Tue, 12 Oct 2010 13:04:09 +0100
+Subject: [PATCH 09/13] Add Security settings panel
+
+---
+ capplets/Makefile.am                     |    5 +
+ capplets/security/Makefile.am            |   61 +++
+ capplets/security/cc-security-panel.c    |  579 +++++++++++++++++++++++
+ capplets/security/cc-security-panel.h    |   54 +++
+ capplets/security/run-passwd.c           |  753 ++++++++++++++++++++++++++++++
+ capplets/security/run-passwd.h           |   57 +++
+ capplets/security/security-module.c      |   42 ++
+ capplets/security/security.desktop.in.in |    9 +
+ capplets/security/security.ui            |  214 +++++++++
+ configure.ac                             |   20 +
+ po/POTFILES.in                           |    4 +
+ po/POTFILES.skip                         |    1 +
+ 12 files changed, 1799 insertions(+), 0 deletions(-)
+ create mode 100644 capplets/security/Makefile.am
+ create mode 100644 capplets/security/cc-security-panel.c
+ create mode 100644 capplets/security/cc-security-panel.h
+ create mode 100644 capplets/security/run-passwd.c
+ create mode 100644 capplets/security/run-passwd.h
+ create mode 100644 capplets/security/security-module.c
+ create mode 100644 capplets/security/security.desktop.in.in
+ create mode 100644 capplets/security/security.ui
+
+diff --git a/capplets/Makefile.am b/capplets/Makefile.am
+index 65d80c3..d991c4e 100644
+--- a/capplets/Makefile.am
++++ b/capplets/Makefile.am
+@@ -21,6 +21,7 @@ DIST_SUBDIRS = \
+ 	keyboard		\
+ 	mouse			\
+ 	network			\
++	security		\
+ 	windows			\
+ 	display 		\
+ 	date			\
+@@ -32,4 +33,8 @@ if BUILD_ABOUTME
+ SUBDIRS += about-me
+ endif
+ 
++if BUILD_SECURITY
++SUBDIRS += security
++endif
++
+ -include $(top_srcdir)/git.mk
+diff --git a/capplets/security/Makefile.am b/capplets/security/Makefile.am
+new file mode 100644
+index 0000000..bbe0cc4
+--- /dev/null
++++ b/capplets/security/Makefile.am
+@@ -0,0 +1,61 @@
++cappletname = security
++
++NULL =
++
++libsecurity_la_SOURCES = \
++	security-module.c \
++	cc-security-panel.c \
++	cc-security-panel.h \
++	run-passwd.h \
++	run-passwd.c \
++	$(NULL)
++
++ui_files = \
++	security.ui \
++	$(NULL)
++
++
++libsecurity_la_CFLAGS = \
++	$(EXTENSION_CFLAGS) \
++	$(EXTENSION_COMMON_CFLAGS)
++
++libsecurity_la_LDFLAGS = \
++	$(EXTENSION_LIBTOOL_FLAGS)
++
++libsecurity_la_LIBADD = \
++	$(EXTENSION_LIBS) \
++	$(EXTENSION_COMMON_LIBS) \
++	$(MX_GTK_LIBS) \
++	$(NULL)
++
++@INTLTOOL_DESKTOP_RULE@
++
++uidir   = $(pkgdatadir)/ui
++ui_DATA = $(ui_files)
++
++desktopdir = $(datadir)/applications
++desktop_in_files = security.desktop.in
++desktop_DATA = $(desktop_in_files:.desktop.in=.desktop)
++
++INCLUDES = \
++	$(GNOMECC_CAPPLETS_CFLAGS) \
++	$(MX_GTK_CFLAGS) \
++	-I$(top_srcdir)/libgnome-control-center-extension \
++	-DUIDIR=\""$(uidir)"\" \
++	-DGNOMELOCALEDIR="\"$(datadir)/locale\"" \
++	$(NULL)
++
++ccmodulesdir = $(EXTENSIONSDIR)
++ccmodules_LTLIBRARIES = libsecurity.la
++
++CLEANFILES = \
++	$(GNOMECC_CAPPLETS_CLEANFILES) \
++	$(desktop_in_files) \
++	$(desktop_DATA) \
++	$(NULL)
++
++EXTRA_DIST = \
++	$(ui_DATA) \
++	$(NULL)
++
++-include $(top_srcdir)/git.mk
+diff --git a/capplets/security/cc-security-panel.c b/capplets/security/cc-security-panel.c
+new file mode 100644
+index 0000000..8c4e424
+--- /dev/null
++++ b/capplets/security/cc-security-panel.c
+@@ -0,0 +1,579 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*- */
++
++/* cc-security-panel.c
++ * Copyright (C) 2010 Intel Corporation
++ *
++ * Written by: Jussi Kukkonen <jku@linux.intel.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ */
++
++/* TODO:
++ * * there is currently no indication that the current passwd is being
++ *   checked when unfocusing the entry. A busy-interactive cursor might
++ *   work
++ *
++ * NOTES:
++ * * currently uses PasswdHandler from accounts-dialog/users-admin/
++ *   gnome-about-me. This is quite horrible and seems to break in some 
++ *   cases. Using something like accountsservice might be a better long
++ *   term solution.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <stdlib.h>
++#include <string.h>
++#include <glib/gi18n.h>
++#include <glib/gstdio.h>
++#include <gconf/gconf-client.h>
++#include <gtk/gtk.h>
++#include <mx-gtk/mx-gtk.h>
++
++#include "capplet-util.h"
++#include "run-passwd.h"
++#include "cc-security-panel.h"
++
++#define SCREEN_LOCK_DIR "/apps/gnome-screensaver"
++#define SCREEN_LOCK_KEY SCREEN_LOCK_DIR"/lock_enabled"
++
++#define GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), CC_TYPE_SECURITY_PANEL, CcSecurityPanelPrivate))
++
++#define GET_WIDGET(b,s) GTK_WIDGET (gtk_builder_get_object (b, s))
++
++struct CcSecurityPanelPrivate {
++        GtkWidget *password_toggle;
++        guint toggle_id;
++
++        GtkWidget *current_entry;
++        GtkWidget *current_info_bar;
++        gboolean grab_after_validation;
++        gboolean current_is_valid;
++
++        GtkWidget *new_entry;
++        GtkWidget *verify_entry;
++        GtkWidget *verify_info_bar;
++        GtkWidget *verify_info_label;
++
++        GtkWidget *save_button;
++
++        PasswdHandler *passwd_handler;
++        GConfClient *gconf;
++};
++
++G_DEFINE_DYNAMIC_TYPE (CcSecurityPanel, cc_security_panel, CC_TYPE_PANEL)
++
++static void
++cc_security_panel_update_sensitivity (CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++        gboolean ok = FALSE;
++
++        if (priv->current_is_valid) {
++                char const *new, *verify;
++
++                new = gtk_entry_get_text (GTK_ENTRY (priv->new_entry));
++                verify = gtk_entry_get_text (GTK_ENTRY (priv->verify_entry));
++                if (strlen (new) != 0 &&
++                    strlen (verify) != 0 &&
++                    strcmp (new, verify) == 0) {
++                        ok = TRUE;
++                }
++        }
++        gtk_widget_set_sensitive (priv->save_button, ok);
++}
++
++static void
++password_authenticated_cb (PasswdHandler   *passwd_handler,
++                           GError          *error,
++                           CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        if (error) {
++                priv->current_is_valid = FALSE;
++                gtk_widget_show (priv->current_info_bar);
++        } else {
++                priv->current_is_valid = TRUE;
++                gtk_widget_hide (priv->current_info_bar);
++                if (priv->grab_after_validation &&
++                    GTK_WIDGET_HAS_FOCUS (priv->current_entry)) {
++                        gtk_widget_grab_focus (priv->new_entry);
++                }
++        }
++        priv->grab_after_validation = FALSE;
++
++        cc_security_panel_update_sensitivity (panel);
++}
++
++static void
++cc_security_panel_validate_current_password (CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++        const char *text;
++
++        text = gtk_entry_get_text (GTK_ENTRY (priv->current_entry));
++        if (strlen (text) > 0) {
++                passwd_authenticate (priv->passwd_handler, text,
++                                     (PasswdCallback)password_authenticated_cb,
++                                     panel);
++        }   
++}
++
++static gboolean
++cc_security_panel_verify_new_password (CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++        char const *new, *verify;
++
++        new = gtk_entry_get_text (GTK_ENTRY (priv->new_entry));
++        verify = gtk_entry_get_text (GTK_ENTRY (priv->verify_entry));
++        if (strlen (new) == 0 || strlen (verify) == 0) {
++                gtk_widget_hide (priv->verify_info_bar);
++                return FALSE;
++        } else if (strcmp (new, verify) == 0) {
++                gtk_widget_hide (priv->verify_info_bar);
++                return TRUE;
++        } else {
++                gtk_label_set_text (GTK_LABEL (priv->verify_info_label),
++                                    _("Sorry, the passwords do not match"));
++                gtk_info_bar_set_message_type (GTK_INFO_BAR (priv->verify_info_bar),
++                                               GTK_MESSAGE_WARNING);
++                gtk_widget_show (priv->verify_info_bar);
++                return FALSE;
++        }
++}
++
++static void
++password_changed_cb (PasswdHandler   *passwd_handler,
++                     GError          *error,
++                     CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++       gtk_widget_set_sensitive (priv->current_entry, TRUE);
++       gtk_widget_set_sensitive (priv->new_entry, TRUE);
++       gtk_widget_set_sensitive (priv->verify_entry, TRUE);
++
++        if (!error) {
++                gtk_entry_set_text (GTK_ENTRY (priv->current_entry), "");
++                gtk_entry_set_text (GTK_ENTRY (priv->new_entry), "");
++                gtk_entry_set_text (GTK_ENTRY (priv->verify_entry), "");
++
++                gtk_label_set_text (GTK_LABEL (priv->verify_info_label),
++                                    _("The new password is now saved"));
++                gtk_info_bar_set_message_type (GTK_INFO_BAR (priv->verify_info_bar),
++                                               GTK_MESSAGE_INFO);
++                gtk_widget_show (priv->verify_info_bar);
++        } else {
++                switch (error->code) {
++                case PASSWD_ERROR_REJECTED:
++                        gtk_entry_set_text (GTK_ENTRY (priv->new_entry), "");
++                        gtk_entry_set_text (GTK_ENTRY (priv->verify_entry), "");
++                        gtk_widget_grab_focus (priv->new_entry);
++
++                        gtk_label_set_text (GTK_LABEL (priv->verify_info_label),
++                                            error->message);
++                        gtk_info_bar_set_message_type (GTK_INFO_BAR (priv->verify_info_bar),
++                                                       GTK_MESSAGE_WARNING);
++                        gtk_widget_show (priv->verify_info_bar);
++                        break;
++
++                case PASSWD_ERROR_AUTH_FAILED:
++                        gtk_entry_set_text (GTK_ENTRY (priv->current_entry), "");
++                        gtk_widget_grab_focus (priv->current_entry);
++
++                        gtk_widget_show (priv->current_info_bar);
++                        break;
++
++                default:
++                        g_warning ("Password change failed: %s", error->message);
++
++                        gtk_widget_set_sensitive (priv->save_button, TRUE);
++
++                        gtk_label_set_text (GTK_LABEL (priv->verify_info_label),
++                                            _("Sorry, the password could not be changed"));
++                        gtk_info_bar_set_message_type (GTK_INFO_BAR (priv->verify_info_bar),
++                                                       GTK_MESSAGE_WARNING);
++                        gtk_widget_show (priv->verify_info_bar);
++                }
++        }
++
++        /* PasswdHandler seems to break in interesting ways after this.
++         * Fixing it is not trivial, working around... */
++        passwd_destroy (priv->passwd_handler);
++        priv->passwd_handler = passwd_init ();
++        cc_security_panel_validate_current_password (panel);
++}
++
++static void
++cc_security_panel_change_password (CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        const char *new;
++
++        gtk_widget_set_sensitive (priv->current_entry, FALSE);
++        gtk_widget_set_sensitive (priv->new_entry, FALSE);
++        gtk_widget_set_sensitive (priv->verify_entry, FALSE);
++        gtk_widget_set_sensitive (priv->save_button, FALSE);
++
++        new = gtk_entry_get_text (GTK_ENTRY (priv->new_entry));
++        passwd_change_password (priv->passwd_handler, new,
++                                (PasswdCallback)password_changed_cb, panel);
++}
++
++static void
++cc_security_panel_update_password_toggle (CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++        GError *error = NULL;
++        gboolean lock = FALSE;
++
++        lock = gconf_client_get_bool (priv->gconf, SCREEN_LOCK_KEY, &error);
++        if (error) {
++                g_warning ("Could not read key %s: %s",
++                           SCREEN_LOCK_KEY, error->message);
++                g_error_free (error);
++        }
++
++        g_signal_handler_block (priv->password_toggle, priv->toggle_id);
++        g_object_set (priv->password_toggle,
++                      "active", lock,
++                      NULL);
++        g_signal_handler_unblock (priv->password_toggle, priv->toggle_id);
++
++}
++
++static void
++current_entry_activate (GtkEntry *entry, CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        priv->grab_after_validation = TRUE;
++        cc_security_panel_validate_current_password (panel);
++}
++
++static gboolean
++current_entry_focus_out (GtkEntry        *entry,
++                         GdkEventFocus   *event,
++                         CcSecurityPanel *panel)
++{
++        cc_security_panel_validate_current_password (panel);
++        return FALSE;
++}
++
++static void
++current_entry_notify_text (GtkEntry        *entry,
++                           GParamSpec      *pspec,
++                           CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        gtk_widget_hide (priv->current_info_bar);
++        priv->current_is_valid = FALSE;
++
++        cc_security_panel_update_sensitivity (panel);
++}
++
++static void
++new_entry_activate (GtkEntry *entry, CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        cc_security_panel_verify_new_password (panel);
++        gtk_widget_grab_focus (priv->verify_entry);
++}
++
++static void
++verify_entry_activate (GtkEntry *entry, CcSecurityPanel *panel)
++{
++        if (cc_security_panel_verify_new_password (panel)) {
++                cc_security_panel_change_password (panel);
++        }
++}
++
++static gboolean
++new_or_verify_entry_focus_out (GtkEntry        *entry,
++                               GdkEventFocus   *event,
++                               CcSecurityPanel *panel)
++{
++        if (strlen (gtk_entry_get_text (GTK_ENTRY (entry))) > 0) {
++                cc_security_panel_verify_new_password (panel);
++        }
++        return FALSE;
++}
++
++static void
++new_or_verify_entry_notify_text (GtkEntry     *entry,
++                                 GParamSpec   *pspec,
++                                 CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        gtk_widget_hide (priv->verify_info_bar);
++        cc_security_panel_update_sensitivity (panel);
++}
++
++static void
++password_toggle_notify_active (GtkWidget    *widget,
++                               GParamSpec   *pspec,
++                               CcSecurityPanel *panel)
++{
++        char *lockfile;
++        gboolean lock;
++
++        g_object_get (widget, "active", &lock, NULL);
++        gconf_client_set_bool (panel->priv->gconf,
++                               SCREEN_LOCK_KEY, lock,
++                               NULL);
++
++        /* touch or remove a file to set lock-on-boot status */
++        lockfile = g_strdup_printf ("%s/lock-screen", g_get_user_config_dir ());
++        if (lock) {
++                g_file_set_contents (lockfile, "", -1, NULL);
++        } else {
++                g_remove (lockfile);
++        }
++        g_free (lockfile);
++}
++
++static void
++save_button_clicked (GtkButton *button, CcSecurityPanel *panel)
++{
++        cc_security_panel_change_password (panel);
++}
++
++static void
++gconf_notify (GConfClient *gconf,
++              guint id,
++              GConfEntry *entry,
++              CcSecurityPanel *panel)
++{
++        cc_security_panel_update_password_toggle (panel);
++}
++
++static void
++panel_active_changed (CcSecurityPanel *panel, gboolean active)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++
++        if (active) {
++                gtk_entry_set_text (GTK_ENTRY (priv->current_entry), "");
++                gtk_entry_set_text (GTK_ENTRY (priv->new_entry), "");
++                gtk_entry_set_text (GTK_ENTRY (priv->verify_entry), "");
++
++                gtk_widget_hide (priv->verify_info_bar);
++                gtk_widget_hide (priv->current_info_bar);
++        }
++}
++
++static void
++cc_security_panel_setup_panel (CcSecurityPanel *panel)
++{
++        CcSecurityPanelPrivate *priv = GET_PRIVATE (panel);
++        GtkWidget *main_window, *box, *toggle_box, *c_area, *label;
++        GtkBuilder *builder;
++        GError *error = NULL;
++
++        builder = gtk_builder_new ();
++        gtk_builder_set_translation_domain (builder, GETTEXT_PACKAGE);
++
++        if (gtk_builder_add_from_file (builder,
++                                       UIDIR"/security.ui",
++                                       &error) == 0) {
++                g_error ("Could not parse UI file: %s", error->message);
++                g_error_free (error);
++                g_object_unref (builder);
++                return;
++        }
++
++        priv->gconf = gconf_client_get_default ();
++        gconf_client_add_dir (priv->gconf,
++                              SCREEN_LOCK_DIR,
++                              GCONF_CLIENT_PRELOAD_ONELEVEL,
++                              NULL);
++        gconf_client_notify_add (priv->gconf,
++                                 SCREEN_LOCK_KEY,
++                                 (GConfClientNotifyFunc) gconf_notify,
++                                 panel, NULL, NULL);
++
++        main_window = GET_WIDGET (builder, "main_window");
++        gtk_widget_reparent (gtk_bin_get_child (GTK_BIN (main_window)),
++                             GTK_WIDGET (panel));
++
++        toggle_box = GET_WIDGET (builder, "password_toggle_box");
++        priv->password_toggle = mx_gtk_light_switch_new ();
++        gtk_box_pack_start (GTK_BOX (toggle_box), priv->password_toggle,
++                            FALSE, FALSE, 0);
++        cc_security_panel_update_password_toggle (panel);
++        priv->toggle_id = g_signal_connect (priv->password_toggle,
++                                            "notify::active",
++                                            G_CALLBACK (password_toggle_notify_active),
++                                            panel);
++
++        priv->current_entry = GET_WIDGET (builder, "current_entry");
++        g_signal_connect (priv->current_entry, "activate",
++                          G_CALLBACK (current_entry_activate), panel);
++        g_signal_connect (priv->current_entry, "focus-out-event",
++                          G_CALLBACK (current_entry_focus_out), panel);
++        g_signal_connect (priv->current_entry, "notify::text",
++                          G_CALLBACK (current_entry_notify_text), panel);
++
++        /* no infobar in glade yet... */
++        box = GET_WIDGET (builder, "current_warning_box");
++        priv->current_info_bar = gtk_info_bar_new ();
++        gtk_widget_set_no_show_all (priv->current_info_bar, TRUE);
++        gtk_info_bar_set_message_type (GTK_INFO_BAR (priv->current_info_bar),
++                                       GTK_MESSAGE_WARNING);
++        gtk_box_pack_start_defaults (GTK_BOX (box), priv->current_info_bar);
++        label = gtk_label_new (_("Sorry, that password is incorrect"));
++        gtk_widget_show (label);
++        c_area = gtk_info_bar_get_content_area (
++                GTK_INFO_BAR (priv->current_info_bar));
++        gtk_container_add (GTK_CONTAINER (c_area), label);
++
++        box = GET_WIDGET (builder, "verify_warning_box");
++        priv->verify_info_bar = gtk_info_bar_new ();
++        gtk_widget_set_no_show_all (priv->verify_info_bar, TRUE);
++        gtk_box_pack_start_defaults (GTK_BOX (box), priv->verify_info_bar);
++        priv->verify_info_label = gtk_label_new ("");
++        gtk_widget_show (priv->verify_info_label);
++        c_area = gtk_info_bar_get_content_area (
++                GTK_INFO_BAR (priv->verify_info_bar));
++        gtk_container_add (GTK_CONTAINER (c_area), priv->verify_info_label);
++
++        priv->new_entry = GET_WIDGET (builder, "new_entry");
++        g_signal_connect (priv->new_entry, "activate",
++                          G_CALLBACK (new_entry_activate), panel);
++        g_signal_connect (priv->new_entry, "focus-out-event",
++                          G_CALLBACK (new_or_verify_entry_focus_out), panel);
++        g_signal_connect (priv->new_entry, "notify::text",
++                          G_CALLBACK (new_or_verify_entry_notify_text), panel);
++
++        priv->verify_entry = GET_WIDGET (builder, "verify_entry");
++        g_signal_connect (priv->verify_entry, "activate",
++                          G_CALLBACK (verify_entry_activate), panel);
++        g_signal_connect (priv->verify_entry, "focus-out-event",
++                          G_CALLBACK (new_or_verify_entry_focus_out), panel);
++        g_signal_connect (priv->verify_entry, "notify::text",
++                          G_CALLBACK (new_or_verify_entry_notify_text), panel);
++
++        priv->save_button = GET_WIDGET (builder, "save_button");
++        g_signal_connect (priv->save_button, "clicked",
++                          G_CALLBACK (save_button_clicked), panel);
++
++        g_object_unref (builder);
++
++        priv->passwd_handler = passwd_init ();
++
++        g_signal_connect (panel, "active-changed",
++                          G_CALLBACK (panel_active_changed), NULL);
++}
++
++static GObject *
++cc_security_panel_constructor (GType                  type,
++                               guint                  n_construct_properties,
++                               GObjectConstructParam *construct_properties)
++{
++        CcSecurityPanel *panel;
++
++        panel = CC_SECURITY_PANEL (G_OBJECT_CLASS (cc_security_panel_parent_class)->constructor
++                                   (type, n_construct_properties, construct_properties));
++
++        g_object_set (panel,
++                      "display-name", _("Security"),
++                      "id", "security.desktop",
++                      NULL);
++
++        cc_security_panel_setup_panel (panel);
++
++        return G_OBJECT (panel);
++}
++
++
++static void
++cc_security_panel_class_finalize (CcSecurityPanelClass *klass)
++{
++}
++
++static void
++cc_security_panel_init (CcSecurityPanel *panel)
++{
++        panel->priv = GET_PRIVATE (panel);
++}
++
++static void
++cc_security_panel_dispose (GObject *object)
++{
++        CcSecurityPanel *panel;
++        CcSecurityPanelPrivate *priv;
++
++        g_return_if_fail (object != NULL);
++        g_return_if_fail (CC_IS_SECURITY_PANEL (object));
++
++        panel = CC_SECURITY_PANEL (object);
++        priv = GET_PRIVATE (panel);
++
++        if (priv->passwd_handler) {
++                passwd_destroy (priv->passwd_handler);
++                priv->passwd_handler = NULL;
++        }
++
++        if (priv->gconf) {
++                g_object_unref (priv->gconf);
++                priv->gconf = NULL;
++        }
++}
++
++static void
++cc_security_panel_finalize (GObject *object)
++{
++        CcSecurityPanel *panel;
++
++        g_return_if_fail (object != NULL);
++        g_return_if_fail (CC_IS_SECURITY_PANEL (object));
++
++        panel = CC_SECURITY_PANEL (object);
++
++        g_return_if_fail (panel->priv != NULL);
++
++        G_OBJECT_CLASS (cc_security_panel_parent_class)->finalize (object);
++}
++
++static void
++cc_security_panel_class_init (CcSecurityPanelClass *klass)
++{
++        GObjectClass  *object_class = G_OBJECT_CLASS (klass);
++
++        object_class->constructor = cc_security_panel_constructor;
++        object_class->finalize = cc_security_panel_finalize;
++        object_class->dispose = cc_security_panel_dispose;
++
++        g_type_class_add_private (klass, sizeof (CcSecurityPanelPrivate));
++}
++
++void
++cc_security_panel_register (GIOModule *module)
++{
++        cc_security_panel_register_type (G_TYPE_MODULE (module));
++        g_io_extension_point_implement (CC_PANEL_EXTENSION_POINT_NAME,
++                                        CC_TYPE_SECURITY_PANEL,
++                                        "security",
++                                        10);
++}
+diff --git a/capplets/security/cc-security-panel.h b/capplets/security/cc-security-panel.h
+new file mode 100644
+index 0000000..bc76d27
+--- /dev/null
++++ b/capplets/security/cc-security-panel.h
+@@ -0,0 +1,54 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Intel Corporation.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#ifndef __CC_SECURITY_PANEL_H
++#define __CC_SECURITY_PANEL_H
++
++#include <gtk/gtk.h>
++#include "cc-panel.h"
++
++G_BEGIN_DECLS
++
++#define CC_TYPE_SECURITY_PANEL         (cc_security_panel_get_type ())
++#define CC_SECURITY_PANEL(o)           (G_TYPE_CHECK_INSTANCE_CAST ((o), CC_TYPE_SECURITY_PANEL, CcSecurityPanel))
++#define CC_SECURITY_PANEL_CLASS(k)     (G_TYPE_CHECK_CLASS_CAST((k), CC_TYPE_SECURITY_PANEL, CcSecurityPanelClass))
++#define CC_IS_SECURITY_PANEL(o)        (G_TYPE_CHECK_INSTANCE_TYPE ((o), CC_TYPE_SECURITY_PANEL))
++#define CC_IS_SECURITY_PANEL_CLASS(k)  (G_TYPE_CHECK_CLASS_TYPE ((k), CC_TYPE_SECURITY_PANEL))
++#define CC_SECURITY_PANEL_GET_CLASS(o) (G_TYPE_INSTANCE_GET_CLASS ((o), CC_TYPE_SECURITY_PANEL, CcSecurityPanelClass))
++
++typedef struct CcSecurityPanelPrivate CcSecurityPanelPrivate;
++
++typedef struct
++{
++        CcPanel              parent;
++        CcSecurityPanelPrivate *priv;
++} CcSecurityPanel;
++
++typedef struct
++{
++        CcPanelClass   parent_class;
++} CcSecurityPanelClass;
++
++GType              cc_security_panel_get_type   (void);
++void               cc_security_panel_register   (GIOModule         *module);
++
++G_END_DECLS
++
++#endif /* __CC_SECURITY_PANEL_H */
+diff --git a/capplets/security/run-passwd.c b/capplets/security/run-passwd.c
+new file mode 100644
+index 0000000..c43a145
+--- /dev/null
++++ b/capplets/security/run-passwd.c
+@@ -0,0 +1,753 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: t; c-basic-offset: 8 -*- */
++/* run-passwd.c
++ *
++ * Copyright (C) 2002 Diego Gonzalez
++ * Copyright (C) 2006 Johannes H. Jensen
++ * Copyright (C) 2010 Milan Bouchet-Valat
++ *
++ * Written by: Diego Gonzalez <diego@pemas.net>
++ * Modified by: Johannes H. Jensen <joh@deworks.net>,
++ *              Milan Bouchet-Valat <nalimilan@club.fr>.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ */
++
++/*
++ * This code is taken from accountsdialog, whose developers apparently
++ * took it from users-admin. users-admin version seems to originate from 
++ * gnome-about-me-password.c. Ah, the circle of life...
++ */
++
++#include <config.h>
++#include <glib/gi18n.h>
++
++#include <unistd.h>
++#include <errno.h>
++#include <string.h>
++#include <sys/wait.h>
++
++#if __sun
++#include <sys/types.h>
++#include <signal.h>
++#endif
++
++#include "run-passwd.h"
++
++/* Passwd states */
++typedef enum {
++        PASSWD_STATE_NONE,              /* Passwd is not asking for anything */
++        PASSWD_STATE_AUTH,              /* Passwd is asking for our current password */
++        PASSWD_STATE_NEW,               /* Passwd is asking for our new password */
++        PASSWD_STATE_RETYPE,            /* Passwd is asking for our retyped new password */
++        PASSWD_STATE_DONE,              /* Passwd succeeded but has not yet exited */
++        PASSWD_STATE_ERR                /* Passwd reported an error but has not yet exited */
++} PasswdState;
++
++struct PasswdHandler {
++        const char *current_password;
++        const char *new_password;
++        const char *retyped_password;
++
++        /* Communication with the passwd program */
++        GPid backend_pid;
++
++        GIOChannel *backend_stdin;
++        GIOChannel *backend_stdout;
++
++        GQueue *backend_stdin_queue;            /* Write queue to backend_stdin */
++
++        /* GMainLoop IDs */
++        guint backend_child_watch_id;           /* g_child_watch_add (PID) */
++        guint backend_stdout_watch_id;          /* g_io_add_watch (stdout) */
++
++        /* State of the passwd program */
++        PasswdState backend_state;
++        gboolean    changing_password;
++
++        PasswdCallback auth_cb;
++        gpointer       auth_cb_data;
++
++        PasswdCallback chpasswd_cb;
++        gpointer       chpasswd_cb_data;
++};
++
++/* Buffer size for backend output */
++#define BUFSIZE 128
++
++
++static GQuark
++passwd_error_quark (void)
++{
++        static GQuark q = 0;
++
++        if (q == 0) {
++                q = g_quark_from_static_string("passwd_error");
++        }
++
++        return q;
++}
++
++/* Error handling */
++#define PASSWD_ERROR (passwd_error_quark ())
++
++
++static void
++stop_passwd (PasswdHandler *passwd_handler);
++
++static void
++free_passwd_resources (PasswdHandler *passwd_handler);
++
++static gboolean
++io_watch_stdout (GIOChannel *source, GIOCondition condition, PasswdHandler *passwd_handler);
++
++
++/*
++ * Spawning and closing of backend {{
++ */
++
++/* Child watcher */
++static void
++child_watch_cb (GPid pid, gint status, PasswdHandler *passwd_handler)
++{
++        if (WIFEXITED (status)) {
++                if (WEXITSTATUS (status) >= 255) {
++                        g_warning ("Child exited unexpectedly");
++                }
++                if (WEXITSTATUS (status) == 0) {
++                        if (passwd_handler->backend_state == PASSWD_STATE_RETYPE) {
++                                passwd_handler->backend_state = PASSWD_STATE_DONE;
++                                if (passwd_handler->chpasswd_cb)
++                                                passwd_handler->chpasswd_cb (passwd_handler,
++                                                                             NULL,
++                                                                             passwd_handler->auth_cb_data);
++                        }
++                }
++        }
++
++        free_passwd_resources (passwd_handler);
++}
++
++static void
++ignore_sigpipe (gpointer data)
++{
++        signal (SIGPIPE, SIG_IGN);
++}
++
++/* Spawn passwd backend
++ * Returns: TRUE on success, FALSE otherwise and sets error appropriately */
++static gboolean
++spawn_passwd (PasswdHandler *passwd_handler, GError **error)
++{
++        gchar   *argv[2];
++        gchar   *envp[1];
++        gint    my_stdin, my_stdout, my_stderr;
++
++        argv[0] = "/usr/bin/passwd";    /* Is it safe to rely on a hard-coded path? */
++        argv[1] = NULL;
++
++        envp[0] = NULL;                 /* If we pass an empty array as the environment,
++                                         * will the childs environment be empty, and the
++                                         * locales set to the C default? From the manual:
++                                         * "If envp is NULL, the child inherits its
++                                         * parent'senvironment."
++                                         * If I'm wrong here, we somehow have to set
++                                         * the locales here.
++                                         */
++
++        if (!g_spawn_async_with_pipes (NULL,                            /* Working directory */
++                                       argv,                            /* Argument vector */
++                                       envp,                            /* Environment */
++                                       G_SPAWN_DO_NOT_REAP_CHILD,       /* Flags */
++                                       ignore_sigpipe,                  /* Child setup */
++                                       NULL,                            /* Data to child setup */
++                                       &passwd_handler->backend_pid,    /* PID */
++                                       &my_stdin,                       /* Stdin */
++                                       &my_stdout,                      /* Stdout */
++                                       &my_stderr,                      /* Stderr */
++                                       error)) {                        /* GError */
++
++                /* An error occured */
++                free_passwd_resources (passwd_handler);
++
++                return FALSE;
++        }
++
++        /* 2>&1 */
++        if (dup2 (my_stderr, my_stdout) == -1) {
++                /* Failed! */
++                g_set_error_literal (error,
++                                     PASSWD_ERROR,
++                                     PASSWD_ERROR_BACKEND,
++                                     strerror (errno));
++
++                /* Clean up */
++                stop_passwd (passwd_handler);
++
++                return FALSE;
++        }
++
++        /* Open IO Channels */
++        passwd_handler->backend_stdin = g_io_channel_unix_new (my_stdin);
++        passwd_handler->backend_stdout = g_io_channel_unix_new (my_stdout);
++
++        /* Set raw encoding */
++        /* Set nonblocking mode */
++        if (g_io_channel_set_encoding (passwd_handler->backend_stdin, NULL, error) != G_IO_STATUS_NORMAL ||
++                g_io_channel_set_encoding (passwd_handler->backend_stdout, NULL, error) != G_IO_STATUS_NORMAL ||
++                g_io_channel_set_flags (passwd_handler->backend_stdin, G_IO_FLAG_NONBLOCK, error) != G_IO_STATUS_NORMAL ||
++                g_io_channel_set_flags (passwd_handler->backend_stdout, G_IO_FLAG_NONBLOCK, error) != G_IO_STATUS_NORMAL ) {
++
++                /* Clean up */
++                stop_passwd (passwd_handler);
++                return FALSE;
++        }
++
++        /* Turn off buffering */
++        g_io_channel_set_buffered (passwd_handler->backend_stdin, FALSE);
++        g_io_channel_set_buffered (passwd_handler->backend_stdout, FALSE);
++
++        /* Add IO Channel watcher */
++        passwd_handler->backend_stdout_watch_id = g_io_add_watch (passwd_handler->backend_stdout,
++                                                                  G_IO_IN | G_IO_PRI,
++                                                                  (GIOFunc) io_watch_stdout, passwd_handler);
++
++        /* Add child watcher */
++        passwd_handler->backend_child_watch_id = g_child_watch_add (passwd_handler->backend_pid, (GChildWatchFunc) child_watch_cb, passwd_handler);
++
++        /* Success! */
++
++        return TRUE;
++}
++
++/* Stop passwd backend */
++static void
++stop_passwd (PasswdHandler *passwd_handler)
++{
++        /* This is the standard way of returning from the dialog with passwd.
++         * If we return this way we can safely kill passwd as it has completed
++         * its task.
++         */
++
++        if (passwd_handler->backend_pid != -1) {
++                kill (passwd_handler->backend_pid, 9);
++        }
++
++        /* We must run free_passwd_resources here and not let our child
++         * watcher do it, since it will access invalid memory after the
++         * dialog has been closed and cleaned up.
++         *
++         * If we had more than a single thread we'd need to remove
++         * the child watch before trying to kill the child.
++         */
++        free_passwd_resources (passwd_handler);
++}
++
++/* Clean up passwd resources */
++static void
++free_passwd_resources (PasswdHandler *passwd_handler)
++{
++        GError  *error = NULL;
++
++        /* Remove the child watcher */
++        if (passwd_handler->backend_child_watch_id != 0) {
++
++                g_source_remove (passwd_handler->backend_child_watch_id);
++
++                passwd_handler->backend_child_watch_id = 0;
++        }
++
++
++        /* Close IO channels (internal file descriptors are automatically closed) */
++        if (passwd_handler->backend_stdin != NULL) {
++
++                if (g_io_channel_shutdown (passwd_handler->backend_stdin, TRUE, &error) != G_IO_STATUS_NORMAL) {
++                        g_warning ("Could not shutdown backend_stdin IO channel: %s", error->message);
++                        g_error_free (error);
++                        error = NULL;
++                }
++
++                g_io_channel_unref (passwd_handler->backend_stdin);
++                passwd_handler->backend_stdin = NULL;
++        }
++
++        if (passwd_handler->backend_stdout != NULL) {
++
++                if (g_io_channel_shutdown (passwd_handler->backend_stdout, TRUE, &error) != G_IO_STATUS_NORMAL) {
++                        g_warning ("Could not shutdown backend_stdout IO channel: %s", error->message);
++                        g_error_free (error);
++                        error = NULL;
++                }
++
++                g_io_channel_unref (passwd_handler->backend_stdout);
++
++                passwd_handler->backend_stdout = NULL;
++        }
++
++        /* Remove IO watcher */
++        if (passwd_handler->backend_stdout_watch_id != 0) {
++
++                g_source_remove (passwd_handler->backend_stdout_watch_id);
++
++                passwd_handler->backend_stdout_watch_id = 0;
++        }
++
++        /* Close PID */
++        if (passwd_handler->backend_pid != -1) {
++
++                g_spawn_close_pid (passwd_handler->backend_pid);
++
++                passwd_handler->backend_pid = -1;
++        }
++
++        /* Clear backend state */
++        passwd_handler->backend_state = PASSWD_STATE_NONE;
++}
++
++/*
++ * }} Spawning and closing of backend
++ */
++
++/*
++ * Backend communication code {{
++ */
++
++/* Write the first element of queue through channel */
++static void
++io_queue_pop (GQueue *queue, GIOChannel *channel)
++{
++        gchar   *buf;
++        gsize   bytes_written;
++        GError  *error = NULL;
++
++        buf = g_queue_pop_head (queue);
++        if (buf != NULL) {
++
++                if (g_io_channel_write_chars (channel, buf, -1, &bytes_written, &error) != G_IO_STATUS_NORMAL) {
++                        g_warning ("Could not write queue element \"%s\" to channel: %s", buf, error->message);
++                        g_error_free (error);
++                }
++
++                /* Ensure passwords are cleared from memory */
++                memset (buf, 0, strlen (buf));
++                g_free (buf);
++        }
++}
++
++/* Goes through the argument list, checking if one of them occurs in str
++ * Returns: TRUE as soon as an element is found to match, FALSE otherwise */
++static gboolean
++is_string_complete (gchar *str, ...)
++{
++        va_list ap;
++        gchar   *arg;
++
++        if (strlen (str) == 0) {
++                return FALSE;
++        }
++
++        va_start (ap, str);
++
++        while ((arg = va_arg (ap, char *)) != NULL) {
++                if (strstr (str, arg) != NULL) {
++                        va_end (ap);
++                        return TRUE;
++                }
++        }
++
++        va_end (ap);
++
++        return FALSE;
++}
++
++/*
++ * IO watcher for stdout, called whenever there is data to read from the backend.
++ * This is where most of the actual IO handling happens.
++ */
++static gboolean
++io_watch_stdout (GIOChannel *source, GIOCondition condition, PasswdHandler *passwd_handler)
++{
++        static GString *str = NULL;     /* Persistent buffer */
++
++        gchar           buf[BUFSIZE];           /* Temporary buffer */
++        gsize           bytes_read;
++        GError          *gio_error = NULL;      /* Error returned by functions */
++        GError          *error = NULL;          /* Error sent to callbacks */
++
++        gboolean        reinit = FALSE;
++
++        /* Initialize buffer */
++        if (str == NULL) {
++                str = g_string_new ("");
++        }
++
++        if (g_io_channel_read_chars (source, buf, BUFSIZE, &bytes_read, &gio_error)
++            != G_IO_STATUS_NORMAL) {
++                g_warning ("IO Channel read error: %s", gio_error->message);
++                g_error_free (gio_error);
++
++                return TRUE;
++        }
++
++        str = g_string_append_len (str, buf, bytes_read);
++        /* In which state is the backend? */
++        switch (passwd_handler->backend_state) {
++                case PASSWD_STATE_AUTH:
++                        /* Passwd is asking for our current password */
++
++                        if (is_string_complete (str->str, "assword: ", "failure", "wrong", "error", NULL)) {
++
++                                if (strstr (str->str, "assword: ") != NULL) {
++                                        /* Authentication successful */
++
++                                        passwd_handler->backend_state = PASSWD_STATE_NEW;
++
++                                        /* Trigger callback to update authentication status */
++                                        if (passwd_handler->auth_cb)
++                                                passwd_handler->auth_cb (passwd_handler,
++                                                                         NULL,
++                                                                         passwd_handler->auth_cb_data);
++
++                                } else {
++                                        /* Authentication failed */
++
++                                        error = g_error_new_literal (PASSWD_ERROR, PASSWD_ERROR_AUTH_FAILED,
++                                                                     _("Authentication failed"));
++
++                                        passwd_handler->changing_password = FALSE;
++
++                                        /* This error can happen both while authenticating or while changing password:
++                                         * if chpasswd_cb is set, this means we're already changing password */
++                                        if (passwd_handler->chpasswd_cb)
++                                                passwd_handler->chpasswd_cb (passwd_handler,
++                                                                             error,
++                                                                             passwd_handler->auth_cb_data);
++                                        else if (passwd_handler->auth_cb)
++                                                passwd_handler->auth_cb (passwd_handler,
++                                                                         error,
++                                                                         passwd_handler->auth_cb_data);
++
++                                        g_error_free (error);
++                                }
++
++                                reinit = TRUE;
++                        }
++                        break;
++                case PASSWD_STATE_NEW:
++                        /* Passwd is asking for our new password */
++
++                        if (is_string_complete (str->str, "assword: ", NULL)) {
++                                /* Advance to next state */
++                                passwd_handler->backend_state = PASSWD_STATE_RETYPE;
++
++                                /* Pop retyped password from queue and into IO channel */
++                                io_queue_pop (passwd_handler->backend_stdin_queue, passwd_handler->backend_stdin);
++
++                                reinit = TRUE;
++                        }
++                        break;
++                case PASSWD_STATE_RETYPE:
++                        /* Passwd is asking for our retyped new password */
++
++                        if (is_string_complete (str->str,
++                                                "successfully",
++                                                "short",
++                                                "longer",
++                                                "palindrome",
++                                                "dictionary",
++                                                "simple",
++                                                "similar",
++                                                "wrapped",
++                                                "recovered",
++                                                "unchanged",
++                                                "match",
++                                                "1 numeric or special",
++                                                "failure",
++                                                "DIFFERENT",
++                                                "BAD PASSWORD",
++                                                NULL)) {
++
++                                if (strstr (str->str, "successfully") != NULL) {
++                                        /* Hooray! */
++
++                                        passwd_handler->backend_state = PASSWD_STATE_DONE;
++                                        /* Trigger callback to update status */
++                                        if (passwd_handler->chpasswd_cb)
++                                                passwd_handler->chpasswd_cb (passwd_handler,
++                                                                             NULL,
++                                                                             passwd_handler->chpasswd_cb_data);
++                                }
++                                else {
++                                        /* Ohnoes! */
++
++                                        if (strstr (str->str, "recovered") != NULL) {
++                                                /* What does this indicate?
++                                                 * "Authentication information cannot be recovered?" from libpam? */
++                                                error = g_error_new_literal (PASSWD_ERROR, PASSWD_ERROR_UNKNOWN,
++                                                                             str->str);
++                                        } else if (strstr (str->str, "short") != NULL ||
++                                                   strstr (str->str, "longer") != NULL) {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_REJECTED,
++                                                                     _("The new password is too short"));
++                                        } else if (strstr (str->str, "palindrome") != NULL ||
++                                                   strstr (str->str, "simple") != NULL ||
++                                                   strstr (str->str, "dictionary") != NULL) {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_REJECTED,
++                                                                     _("The new password is too simple"));
++                                        } else if (strstr (str->str, "similar") != NULL ||
++                                                   strstr (str->str, "wrapped") != NULL) {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_REJECTED,
++                                                                     _("The old and new passwords are too similar"));
++                                        } else if (strstr (str->str, "1 numeric or special") != NULL) {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_REJECTED,
++                                                                     _("The new password must contain numeric or special characters"));
++                                        } else if (strstr (str->str, "unchanged") != NULL ||
++                                                   strstr (str->str, "match") != NULL) {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_REJECTED,
++                                                                     _("The old and new passwords are the same"));
++                                        } else if (strstr (str->str, "failure") != NULL) {
++                                                /* Authentication failure */
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_AUTH_FAILED,
++                                                                     _("Your password has been changed since you initially authenticated!"));
++                                        }
++                                        else if (strstr (str->str, "DIFFERENT")) {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_REJECTED,
++                                                                     _("The new password does not contain enough different characters"));
++                                        }
++                                        else {
++                                                error = g_error_new (PASSWD_ERROR, PASSWD_ERROR_UNKNOWN,
++                                                                     _("Unknown error"));
++                                        }
++
++                                        /* At this point, passwd might have exited, in which case
++                                         * child_watch_cb should clean up for us and remove this watcher.
++                                         * On some error conditions though, passwd just re-prompts us
++                                         * for our new password. */
++                                        passwd_handler->backend_state = PASSWD_STATE_ERR;
++
++                                        passwd_handler->changing_password = FALSE;
++
++                                        /* Trigger callback to update status */
++                                        if (passwd_handler->chpasswd_cb)
++                                                passwd_handler->chpasswd_cb (passwd_handler,
++                                                                             error,
++                                                                             passwd_handler->chpasswd_cb_data);
++
++                                        g_error_free (error);
++
++                                }
++
++                                reinit = TRUE;
++
++                                /* child_watch_cb should clean up for us now */
++                        }
++                        break;
++                case PASSWD_STATE_NONE:
++                        /* Passwd is not asking for anything yet */
++                        if (is_string_complete (str->str, "assword: ", NULL)) {
++
++                                /* If the user does not have a password set,
++                                 * passwd will immediately ask for the new password,
++                                 * so skip the AUTH phase */
++                                if (is_string_complete (str->str, "new", "New", NULL)) {
++                                        gchar *pw;
++
++                                        passwd_handler->backend_state = PASSWD_STATE_NEW;
++
++                                        /* since passwd didn't ask for our old password
++                                         * in this case, simply remove it from the queue */
++                                        pw = g_queue_pop_head (passwd_handler->backend_stdin_queue);
++                                        g_free (pw);
++                                } else {
++
++                                        passwd_handler->backend_state = PASSWD_STATE_AUTH;
++
++                                        /* Pop the IO queue, i.e. send current password */
++                                        io_queue_pop (passwd_handler->backend_stdin_queue, passwd_handler->backend_stdin);
++                                }
++
++                                reinit = TRUE;
++                        }
++                        break;
++                default:
++                        /* Passwd has returned an error */
++                        reinit = TRUE;
++                        break;
++        }
++
++        if (reinit) {
++                g_string_free (str, TRUE);
++                str = NULL;
++        }
++
++        /* Continue calling us */
++        return TRUE;
++}
++
++/*
++ * }} Backend communication code
++ */
++
++/* Adds the current password to the IO queue */
++static void
++authenticate (PasswdHandler *passwd_handler)
++{
++        gchar   *s;
++
++        s = g_strdup_printf ("%s\n", passwd_handler->current_password);
++
++        g_queue_push_tail (passwd_handler->backend_stdin_queue, s);
++}
++
++/* Adds the new password twice to the IO queue */
++static void
++update_password (PasswdHandler *passwd_handler)
++{
++        gchar   *s;
++
++        s = g_strdup_printf ("%s\n", passwd_handler->new_password);
++
++        g_queue_push_tail (passwd_handler->backend_stdin_queue, s);
++        /* We need to allocate new space because io_queue_pop() g_free()s
++         * every element of the queue after it's done */
++        g_queue_push_tail (passwd_handler->backend_stdin_queue, g_strdup (s));
++}
++
++
++PasswdHandler *
++passwd_init (void)
++{
++        PasswdHandler *passwd_handler;
++
++        passwd_handler = g_new0 (PasswdHandler, 1);
++
++        /* Initialize backend_pid. -1 means the backend is not running */
++        passwd_handler->backend_pid = -1;
++
++        /* Initialize IO Channels */
++        passwd_handler->backend_stdin = NULL;
++        passwd_handler->backend_stdout = NULL;
++
++        /* Initialize write queue */
++        passwd_handler->backend_stdin_queue = g_queue_new ();
++
++        /* Initialize watchers */
++        passwd_handler->backend_child_watch_id = 0;
++        passwd_handler->backend_stdout_watch_id = 0;
++
++        /* Initialize backend state */
++        passwd_handler->backend_state = PASSWD_STATE_NONE;
++        passwd_handler->changing_password = FALSE;
++
++        return passwd_handler;
++}
++
++void
++passwd_destroy (PasswdHandler *passwd_handler)
++{
++        g_queue_free (passwd_handler->backend_stdin_queue);
++        stop_passwd (passwd_handler);
++        g_free (passwd_handler);
++}
++
++void
++passwd_authenticate (PasswdHandler *passwd_handler,
++                     const char    *current_password,
++                     PasswdCallback cb,
++                     const gpointer user_data)
++{
++        GError *error = NULL;
++
++        /* Don't stop if we've already started chaging password */
++        if (passwd_handler->changing_password)
++                return;
++
++        /* Clear data from possible previous attempts to change password */
++        passwd_handler->new_password = NULL;
++        passwd_handler->chpasswd_cb = NULL;
++        passwd_handler->chpasswd_cb_data = NULL;
++        g_queue_foreach (passwd_handler->backend_stdin_queue, (GFunc) g_free, NULL);
++        g_queue_clear (passwd_handler->backend_stdin_queue);
++
++        passwd_handler->current_password = current_password;
++        passwd_handler->auth_cb = cb;
++        passwd_handler->auth_cb_data = user_data;
++
++        /* Spawn backend */
++        stop_passwd (passwd_handler);
++
++        if (!spawn_passwd (passwd_handler, &error)) {
++                g_warning ("%s", error->message);
++                g_error_free (error);
++
++                return;
++        }
++
++        authenticate (passwd_handler);
++
++        /* Our IO watcher should now handle the rest */
++}
++
++gboolean
++passwd_change_password (PasswdHandler *passwd_handler,
++                        const char    *new_password,
++                        PasswdCallback cb,
++                        const gpointer user_data)
++{
++        GError *error = NULL;
++
++        passwd_handler->changing_password = TRUE;
++
++        passwd_handler->new_password = new_password;
++        passwd_handler->chpasswd_cb = cb;
++        passwd_handler->chpasswd_cb_data = user_data;
++
++        /* Stop passwd if an error occured and it is still running */
++        if (passwd_handler->backend_state == PASSWD_STATE_ERR) {
++
++                /* Stop passwd, free resources */
++                stop_passwd (passwd_handler);
++        }
++
++        /* Check that the backend is still running, or that an error
++         * has occured but it has not yet exited */
++        if (passwd_handler->backend_pid == -1) {
++                /* If it is not, re-run authentication */
++
++                /* Spawn backend */
++                stop_passwd (passwd_handler);
++
++                if (!spawn_passwd (passwd_handler, &error)) {
++                        g_warning ("%s", error->message);
++                        g_error_free (error);
++
++                        return FALSE;
++                }
++
++                /* Add current and new passwords to queue */
++                authenticate (passwd_handler);
++                update_password (passwd_handler);
++        } else {
++                /* Only add new passwords to queue */
++                update_password (passwd_handler);
++        }
++
++        /* Pop new password through the backend */
++        io_queue_pop (passwd_handler->backend_stdin_queue, passwd_handler->backend_stdin);
++
++        /* Our IO watcher should now handle the rest */
++
++        return TRUE;
++}
+diff --git a/capplets/security/run-passwd.h b/capplets/security/run-passwd.h
+new file mode 100644
+index 0000000..1c567a7
+--- /dev/null
++++ b/capplets/security/run-passwd.h
+@@ -0,0 +1,57 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: t; c-basic-offset: 8 -*- */
++/* run-passwd.h
++ *
++ * Copyright (C) 2010 Milan Bouchet-Valat
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA.
++ *
++ * Authors: Milan Bouchet-Valat <nalimilan@club.fr>
++ */
++
++#ifndef _RUN_PASSWD_H
++#define _RUN_PASSWD_H
++
++struct PasswdHandler;
++
++typedef struct PasswdHandler PasswdHandler;
++
++typedef void (*PasswdCallback) (PasswdHandler *passwd_handler, GError *error, const gpointer user_data);
++
++/* Error codes */
++typedef enum {
++        PASSWD_ERROR_REJECTED,          /* New password is not secure enough */
++        PASSWD_ERROR_AUTH_FAILED,       /* Wrong old password, or PAM failure */
++        PASSWD_ERROR_REAUTH_FAILED,     /* Password has changed since first authentication */
++        PASSWD_ERROR_BACKEND,           /* Backend error */
++        PASSWD_ERROR_UNKNOWN            /* General error */
++} PasswdError;
++
++
++PasswdHandler *passwd_init                (void);
++
++void           passwd_destroy             (PasswdHandler *passwd_handler);
++
++void           passwd_authenticate        (PasswdHandler *passwd_handler,
++                                           const char    *current_password,
++                                           PasswdCallback cb,
++                                           gpointer       user_data);
++
++gboolean       passwd_change_password     (PasswdHandler *passwd_handler,
++                                           const char    *new_password,
++                                           PasswdCallback cb,
++                                           const gpointer user_data);
++
++#endif /* _RUN_PASSWD_H */
++
+diff --git a/capplets/security/security-module.c b/capplets/security/security-module.c
+new file mode 100644
+index 0000000..e82ee89
+--- /dev/null
++++ b/capplets/security/security-module.c
+@@ -0,0 +1,42 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Intel Corp
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#include <config.h>
++
++#include <glib.h>
++#include <glib/gi18n-lib.h>
++#include <gmodule.h>
++#include <gio/gio.h>
++
++#include "cc-security-panel.h"
++
++void
++g_io_module_load (GIOModule *module)
++{
++        bindtextdomain (GETTEXT_PACKAGE, GNOMELOCALEDIR);
++        bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
++
++        cc_security_panel_register (module);
++}
++
++void
++g_io_module_unload (GIOModule *module)
++{
++}
+diff --git a/capplets/security/security.desktop.in.in b/capplets/security/security.desktop.in.in
+new file mode 100644
+index 0000000..05aebcc
+--- /dev/null
++++ b/capplets/security/security.desktop.in.in
+@@ -0,0 +1,9 @@
++[Desktop Entry]
++_Name=Security and passwords
++Icon=netbook-security
++Exec=gnome-control-center security.desktop
++Terminal=false
++Type=Application
++StartupNotify=true
++Categories=GNOME;GTK;Settings;DesktopSettings;
++OnlyShowIn=GNOME;
+diff --git a/capplets/security/security.ui b/capplets/security/security.ui
+new file mode 100644
+index 0000000..fc790c6
+--- /dev/null
++++ b/capplets/security/security.ui
+@@ -0,0 +1,214 @@
++<?xml version="1.0"?>
++<interface>
++  <requires lib="gtk+" version="2.16"/>
++  <!-- interface-naming-policy project-wide -->
++  <object class="GtkWindow" id="main_window">
++    <child>
++      <object class="GtkVBox" id="vbox1">
++        <property name="visible">True</property>
++        <property name="border_width">12</property>
++        <property name="orientation">vertical</property>
++        <property name="spacing">12</property>
++        <child>
++          <placeholder/>
++        </child>
++        <child>
++          <object class="GtkHBox" id="hbox1">
++            <property name="visible">True</property>
++            <property name="spacing">8</property>
++            <child>
++              <object class="GtkLabel" id="label3">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">Require a password to turn on or wake up my computer</property>
++              </object>
++              <packing>
++                <property name="position">0</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkHBox" id="password_toggle_box">
++                <property name="visible">True</property>
++                <child>
++                  <placeholder/>
++                </child>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="position">1</property>
++              </packing>
++            </child>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++            <property name="position">1</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkLabel" id="label2">
++            <property name="visible">True</property>
++            <property name="xalign">0</property>
++            <property name="label" translatable="yes">Change password</property>
++            <attributes>
++              <attribute name="weight" value="bold"/>
++              <attribute name="scale" value="1.200000"/>
++            </attributes>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++            <property name="position">2</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkTable" id="table1">
++            <property name="visible">True</property>
++            <property name="n_rows">5</property>
++            <property name="n_columns">2</property>
++            <property name="column_spacing">6</property>
++            <property name="row_spacing">6</property>
++            <child>
++              <object class="GtkLabel" id="label4">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">Current password:</property>
++              </object>
++              <packing>
++                <property name="x_options">GTK_FILL</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkLabel" id="label5">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">New password:</property>
++              </object>
++              <packing>
++                <property name="top_attach">2</property>
++                <property name="bottom_attach">3</property>
++                <property name="x_options">GTK_FILL</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkLabel" id="label6">
++                <property name="visible">True</property>
++                <property name="xalign">0</property>
++                <property name="label" translatable="yes">Repeat password:</property>
++              </object>
++              <packing>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
++                <property name="x_options">GTK_FILL</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkEntry" id="current_entry">
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="visibility">False</property>
++                <property name="invisible_char">&#x25CF;</property>
++              </object>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkEntry" id="new_entry">
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="visibility">False</property>
++                <property name="invisible_char">&#x25CF;</property>
++              </object>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">2</property>
++                <property name="bottom_attach">3</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkEntry" id="verify_entry">
++                <property name="visible">True</property>
++                <property name="can_focus">True</property>
++                <property name="visibility">False</property>
++                <property name="invisible_char">&#x25CF;</property>
++              </object>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">3</property>
++                <property name="bottom_attach">4</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkVBox" id="current_warning_box">
++                <property name="height_request">30</property>
++                <property name="visible">True</property>
++                <property name="orientation">vertical</property>
++                <child>
++                  <placeholder/>
++                </child>
++              </object>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">1</property>
++                <property name="bottom_attach">2</property>
++              </packing>
++            </child>
++            <child>
++              <object class="GtkVBox" id="verify_warning_box">
++                <property name="height_request">30</property>
++                <property name="visible">True</property>
++                <property name="orientation">vertical</property>
++                <child>
++                  <placeholder/>
++                </child>
++              </object>
++              <packing>
++                <property name="left_attach">1</property>
++                <property name="right_attach">2</property>
++                <property name="top_attach">4</property>
++                <property name="bottom_attach">5</property>
++              </packing>
++            </child>
++            <child>
++              <placeholder/>
++            </child>
++            <child>
++              <placeholder/>
++            </child>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++            <property name="position">3</property>
++          </packing>
++        </child>
++        <child>
++          <object class="GtkHButtonBox" id="hbuttonbox1">
++            <property name="visible">True</property>
++            <property name="layout_style">end</property>
++            <child>
++              <object class="GtkButton" id="save_button">
++                <property name="label" translatable="yes">Save new password</property>
++                <property name="visible">True</property>
++                <property name="sensitive">False</property>
++                <property name="can_focus">True</property>
++                <property name="receives_default">True</property>
++              </object>
++              <packing>
++                <property name="expand">False</property>
++                <property name="fill">False</property>
++                <property name="position">0</property>
++              </packing>
++            </child>
++          </object>
++          <packing>
++            <property name="expand">False</property>
++            <property name="position">4</property>
++          </packing>
++        </child>
++      </object>
++    </child>
++  </object>
++</interface>
+diff --git a/configure.ac b/configure.ac
+index 6707c48..55444b1 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -265,6 +265,24 @@ fi
+ AM_CONDITIONAL(BUILD_ABOUTME, test "x$enable_aboutme" = "xyes")
+ 
+ dnl ==============================================
++dnl Security
++dnl ==============================================
++
++AC_MSG_CHECKING([whether to enable Security])
++AC_ARG_ENABLE([security],
++   AC_HELP_STRING([--enable-security],
++                  [enable security capplet]),,
++   [enable_security=no])
++AC_MSG_RESULT([$enable_security])
++
++if test "x$enable_security" = "xyes"; then
++  PKG_CHECK_MODULES(MX_GTK, [mx-gtk-1.0])
++fi
++AC_SUBST(MX_GTK_CFLAGS)
++AC_SUBST(MX_GTK_LIBS)
++
++AM_CONDITIONAL(BUILD_SECURITY, test "x$enable_security" = "xyes")
++
+ dnl ==============================================
+ dnl Check the window manager we need to work with
+ dnl ==============================================
+@@ -388,6 +406,8 @@ capplets/network/Makefile
+ capplets/network/gnome-network-properties.desktop.in
+ capplets/windows/Makefile
+ capplets/windows/window-properties.desktop.in
++capplets/security/Makefile
++capplets/security/security.desktop.in
+ capplets/date/Makefile
+ capplets/language/Makefile
+ font-viewer/Makefile
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index 798718c..d3d9039 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -82,6 +82,10 @@ capplets/network/cc-network-panel.c
+ capplets/network/gnome-network-properties.c
+ capplets/network/gnome-network-properties.desktop.in.in
+ [type: gettext/glade]capplets/network/gnome-network-properties.ui
++capplets/security/cc-security-panel.c
++capplets/security/run-passwd.c
++capplets/security/security.desktop.in.in
++capplets/security/security.ui
+ capplets/windows/gnome-window-properties.c
+ [type: gettext/glade]capplets/windows/gnome-window-properties.ui
+ capplets/windows/window-properties.desktop.in.in
+diff --git a/po/POTFILES.skip b/po/POTFILES.skip
+index 1ac7639..0f60f42 100644
+--- a/po/POTFILES.skip
++++ b/po/POTFILES.skip
+@@ -12,6 +12,7 @@ capplets/keyboard/keyboard.desktop.in
+ capplets/localization/localization.desktop.in
+ capplets/mouse/gnome-settings-mouse.desktop.in
+ capplets/network/gnome-network-properties.desktop.in
++capplets/security/security.desktop.in
+ capplets/sound/gnome-settings-sound.desktop.in
+ capplets/windows/window-properties.desktop.in
+ font-viewer/gnome-font-viewer.desktop.in
+-- 
+1.7.2.3
+

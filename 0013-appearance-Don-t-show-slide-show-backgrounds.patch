@@ -1,0 +1,43 @@
+From 3d621e9c761ed1ec057439f64655a69266b3890e Mon Sep 17 00:00:00 2001
+From: Thomas Wood <thomas.wood@intel.com>
+Date: Fri, 17 Sep 2010 17:45:52 +0100
+Subject: [PATCH 13/13] appearance: Don't show "slide show" backgrounds
+
+Mutter currently does not support slide show backgrounds, so make sure they
+cannot be selected from the list of backgrounds.
+---
+ capplets/appearance/appearance-desktop.c |    3 +++
+ capplets/appearance/gnome-wp-item.c      |    3 +++
+ 2 files changed, 6 insertions(+), 0 deletions(-)
+
+diff --git a/capplets/appearance/appearance-desktop.c b/capplets/appearance/appearance-desktop.c
+index 3c5e82e..5eeb865 100644
+--- a/capplets/appearance/appearance-desktop.c
++++ b/capplets/appearance/appearance-desktop.c
+@@ -184,6 +184,9 @@ wp_add_image (AppearanceData *data,
+ 
+   if (item != NULL)
+   {
++    if (gnome_bg_changes_with_time (item->bg))
++      return NULL;
++
+     if (item->deleted)
+     {
+       item->deleted = FALSE;
+diff --git a/capplets/appearance/gnome-wp-item.c b/capplets/appearance/gnome-wp-item.c
+index 2cf8c3c..dcc32f7 100644
+--- a/capplets/appearance/gnome-wp-item.c
++++ b/capplets/appearance/gnome-wp-item.c
+@@ -73,6 +73,9 @@ static void set_bg_properties (GnomeWPItem *item)
+ 
+   gnome_bg_set_color (item->bg, item->shade_type, item->pcolor, item->scolor);
+   gnome_bg_set_placement (item->bg, item->options);
++
++  if (item && gnome_bg_changes_with_time (item->bg))
++    item->deleted = TRUE;
+ }
+ 
+ void gnome_wp_item_ensure_gnome_bg (GnomeWPItem *item)
+-- 
+1.7.2.3
+

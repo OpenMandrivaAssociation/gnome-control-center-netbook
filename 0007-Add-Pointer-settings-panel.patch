@@ -1,0 +1,597 @@
+From 6709c4494c22be75348a976ea06c568f51666f07 Mon Sep 17 00:00:00 2001
+From: Thomas Wood <thomas.wood@intel.com>
+Date: Thu, 26 Aug 2010 15:37:15 +0100
+Subject: [PATCH 07/13] Add Pointer settings panel
+
+---
+ capplets/mouse/Makefile.am               |   50 ++++++++-
+ capplets/mouse/cc-pointer-panel.c        |  161 ++++++++++++++++++++++++++++++
+ capplets/mouse/cc-pointer-panel.h        |   77 ++++++++++++++
+ capplets/mouse/gnome-mouse-properties.c  |   32 +++++-
+ capplets/mouse/gnome-mouse-properties.h  |   33 ++++++
+ capplets/mouse/gnome-mouse-properties.ui |    4 +-
+ capplets/mouse/mouse-module.c            |   42 ++++++++
+ capplets/mouse/pointer-module.c          |   42 ++++++++
+ po/POTFILES.in                           |    1 +
+ 9 files changed, 428 insertions(+), 14 deletions(-)
+ create mode 100644 capplets/mouse/cc-pointer-panel.c
+ create mode 100644 capplets/mouse/cc-pointer-panel.h
+ create mode 100644 capplets/mouse/gnome-mouse-properties.h
+ create mode 100644 capplets/mouse/mouse-module.c
+ create mode 100644 capplets/mouse/pointer-module.c
+
+diff --git a/capplets/mouse/Makefile.am b/capplets/mouse/Makefile.am
+index 9b1bc98..5ea6161 100644
+--- a/capplets/mouse/Makefile.am
++++ b/capplets/mouse/Makefile.am
+@@ -1,9 +1,52 @@
++NULL =
++
+ # This is used in GNOMECC_CAPPLETS_CFLAGS
+ cappletname = mouse
+ 
++INCLUDES = 						\
++	$(GNOMECC_CAPPLETS_CFLAGS)			\
++	-I$(top_srcdir)/libgnome-control-center-extension	\
++	-DGNOMELOCALEDIR="\"$(datadir)/locale\""	\
++	-DGNOMECC_DATA_DIR="\"$(pkgdatadir)\""		\
++	-DGNOMECC_UI_DIR="\"$(uidir)\""			\
++	$(NULL)
++
+ bin_PROGRAMS = gnome-mouse-properties
+ 
+-gnome_mouse_properties_LDADD = $(GNOMECC_CAPPLETS_LIBS)
++ccmodulesdir = $(EXTENSIONSDIR)
++ccmodules_LTLIBRARIES = libpointer.la
++
++libpointer_la_SOURCES =			\
++	pointer-module.c		\
++	cc-pointer-panel.h		\
++	cc-pointer-panel.c		\
++	gnome-mouse-properties.c	\
++	gnome-mouse-properties.h	\
++	gnome-mouse-accessibility.c	\
++	gnome-mouse-accessibility.h	\
++	$(NULL)
++
++libpointer_la_LDFLAGS =			\
++	$(EXTENSION_LIBTOOL_FLAGS)	\
++	$(NULL)
++
++libpointer_la_LIBADD =			\
++	$(EXTENSION_LIBS)		\
++	$(EXTENSION_COMMON_LIBS)	\
++	$(GNOMECC_CAPPLETS_LIBS)	\
++	$(NULL)
++
++libpointer_la_CFLAGS =			\
++	$(EXTENSION_CFLAGS)		\
++	$(EXTENSION_COMMON_CFLAGS)	\
++	$(NULL)
++
++libpointer_la_LIBTOOLFLAGS = --tag=disable-static
++
++gnome_mouse_properties_LDADD = 		\
++	$(GNOMECC_CAPPLETS_LIBS)	\
++	$(NULL)
++
+ gnome_mouse_properties_SOURCES =	\
+ 	gnome-mouse-properties.c	\
+ 	gnome-mouse-accessibility.c	\
+@@ -24,11 +67,6 @@ desktopdir = $(datadir)/applications
+ Desktop_in_files = gnome-settings-mouse.desktop.in
+ desktop_DATA = $(Desktop_in_files:.desktop.in=.desktop)
+ 
+-INCLUDES = \
+-	$(GNOMECC_CAPPLETS_CFLAGS) \
+-	-DGNOMELOCALEDIR="\"$(datadir)/locale\"" \
+-	-DGNOMECC_DATA_DIR="\"$(pkgdatadir)\"" \
+-	-DGNOMECC_UI_DIR="\"$(uidir)\""
+ CLEANFILES = $(GNOMECC_CAPPLETS_CLEANFILES) $(Desktop_in_files) $(desktop_DATA)
+ EXTRA_DIST = $(ui_DATA) $(pixmap_DATA)
+ 
+diff --git a/capplets/mouse/cc-pointer-panel.c b/capplets/mouse/cc-pointer-panel.c
+new file mode 100644
+index 0000000..fdecf4c
+--- /dev/null
++++ b/capplets/mouse/cc-pointer-panel.c
+@@ -0,0 +1,161 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++/*
++ * Copyright (C) 2010 Intel, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ * Author: Thomas Wood <thomas.wood@intel.com>
++ *
++ */
++
++#include "cc-pointer-panel.h"
++#include "gnome-mouse-properties.h"
++#include "gnome-mouse-accessibility.h"
++
++#include <glib/gi18n.h>
++
++G_DEFINE_DYNAMIC_TYPE (CcPointerPanel, cc_pointer_panel, CC_TYPE_PANEL)
++
++#define POINTER_PANEL_PRIVATE(o) \
++  (G_TYPE_INSTANCE_GET_PRIVATE ((o), CC_TYPE_POINTER_PANEL, CcPointerPanelPrivate))
++
++struct _CcPointerPanelPrivate
++{
++  GConfClient *client;
++};
++
++
++static void
++cc_pointer_panel_get_property (GObject    *object,
++                               guint       property_id,
++                               GValue     *value,
++                               GParamSpec *pspec)
++{
++  switch (property_id)
++    {
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
++    }
++}
++
++static void
++cc_pointer_panel_set_property (GObject      *object,
++                               guint         property_id,
++                               const GValue *value,
++                               GParamSpec   *pspec)
++{
++  switch (property_id)
++    {
++    default:
++      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
++    }
++}
++
++static void
++cc_pointer_panel_dispose (GObject *object)
++{
++  CcPointerPanelPrivate *priv = CC_POINTER_PANEL (object)->priv;
++
++  if (priv->client)
++    {
++      g_object_unref (priv->client);
++      priv->client = NULL;
++    }
++
++  G_OBJECT_CLASS (cc_pointer_panel_parent_class)->dispose (object);
++}
++
++static void
++cc_pointer_panel_finalize (GObject *object)
++{
++  G_OBJECT_CLASS (cc_pointer_panel_parent_class)->finalize (object);
++}
++
++static GObject*
++cc_pointer_panel_constructor (GType                  type,
++                              guint                  n_properties,
++                              GObjectConstructParam *properties)
++{
++  CcPointerPanel *panel;
++  GObjectClass *parent_class;
++
++  parent_class = G_OBJECT_CLASS (cc_pointer_panel_parent_class);
++
++  panel = (CcPointerPanel*) parent_class->constructor (type, n_properties,
++                                                       properties);
++
++  g_object_set (panel,
++                "id", "gnome-settings-mouse.desktop",
++                "display-name", _("Pointing Devices"),
++                NULL);
++
++  return (GObject *) panel;
++}
++
++static void
++cc_pointer_panel_class_init (CcPointerPanelClass *klass)
++{
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++
++  g_type_class_add_private (klass, sizeof (CcPointerPanelPrivate));
++
++  object_class->get_property = cc_pointer_panel_get_property;
++  object_class->set_property = cc_pointer_panel_set_property;
++  object_class->dispose = cc_pointer_panel_dispose;
++  object_class->finalize = cc_pointer_panel_finalize;
++  object_class->constructor = cc_pointer_panel_constructor;
++}
++
++static void
++cc_pointer_panel_class_finalize (CcPointerPanelClass *klass)
++{
++}
++
++static void
++cc_pointer_panel_init (CcPointerPanel *self)
++{
++  GtkBuilder  *builder;
++  GtkWidget   *prefs_widget;
++
++  self->priv = POINTER_PANEL_PRIVATE (self);
++
++  self->priv->client = mouse_properties_conf_init ();
++
++  builder = create_dialog ();
++
++  setup_accessibility (builder, self->priv->client);
++
++  prefs_widget = (GtkWidget*) gtk_builder_get_object (builder, "prefs_widget");
++
++  gtk_widget_reparent (prefs_widget, GTK_WIDGET (self));
++}
++
++CcPointerPanel *
++cc_pointer_panel_new (void)
++{
++  return g_object_new (CC_TYPE_POINTER_PANEL, NULL);
++}
++
++
++void
++cc_pointer_panel_register (GIOModule *module)
++{
++  cc_pointer_panel_register_type (G_TYPE_MODULE (module));
++  g_io_extension_point_implement (CC_PANEL_EXTENSION_POINT_NAME,
++                                  CC_TYPE_POINTER_PANEL,
++                                  "pointer",
++                                  10);
++}
+diff --git a/capplets/mouse/cc-pointer-panel.h b/capplets/mouse/cc-pointer-panel.h
+new file mode 100644
+index 0000000..4042a23
+--- /dev/null
++++ b/capplets/mouse/cc-pointer-panel.h
+@@ -0,0 +1,77 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++/*
++ * Copyright (C) 2010 Intel, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ * Author: Thomas Wood <thomas.wood@intel.com>
++ *
++ */
++
++#ifndef _CC_POINTER_PANEL_H
++#define _CC_POINTER_PANEL_H
++
++#include <glib-object.h>
++#include "cc-panel.h"
++
++G_BEGIN_DECLS
++
++#define CC_TYPE_POINTER_PANEL cc_pointer_panel_get_type()
++
++#define CC_POINTER_PANEL(obj) \
++  (G_TYPE_CHECK_INSTANCE_CAST ((obj), \
++  CC_TYPE_POINTER_PANEL, CcPointerPanel))
++
++#define CC_POINTER_PANEL_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_CAST ((klass), \
++  CC_TYPE_POINTER_PANEL, CcPointerPanelClass))
++
++#define CC_IS_POINTER_PANEL(obj) \
++  (G_TYPE_CHECK_INSTANCE_TYPE ((obj), \
++  CC_TYPE_POINTER_PANEL))
++
++#define CC_IS_POINTER_PANEL_CLASS(klass) \
++  (G_TYPE_CHECK_CLASS_TYPE ((klass), \
++  CC_TYPE_POINTER_PANEL))
++
++#define CC_POINTER_PANEL_GET_CLASS(obj) \
++  (G_TYPE_INSTANCE_GET_CLASS ((obj), \
++  CC_TYPE_POINTER_PANEL, CcPointerPanelClass))
++
++typedef struct _CcPointerPanel CcPointerPanel;
++typedef struct _CcPointerPanelClass CcPointerPanelClass;
++typedef struct _CcPointerPanelPrivate CcPointerPanelPrivate;
++
++struct _CcPointerPanel
++{
++  CcPanel parent;
++
++  CcPointerPanelPrivate *priv;
++};
++
++struct _CcPointerPanelClass
++{
++  CcPanelClass parent_class;
++};
++
++GType cc_pointer_panel_get_type (void) G_GNUC_CONST;
++
++CcPointerPanel *cc_pointer_panel_new (void);
++void cc_pointer_panel_register (GIOModule *module);
++
++G_END_DECLS
++
++#endif /* _CC_POINTER_PANEL_H */
+diff --git a/capplets/mouse/gnome-mouse-properties.c b/capplets/mouse/gnome-mouse-properties.c
+index 041ef58..e58b3fa 100644
+--- a/capplets/mouse/gnome-mouse-properties.c
++++ b/capplets/mouse/gnome-mouse-properties.c
+@@ -25,6 +25,8 @@
+ 
+ #include <config.h>
+ 
++#include "gnome-mouse-properties.h"
++
+ #include <glib/gi18n.h>
+ #include <string.h>
+ #include <gconf/gconf-client.h>
+@@ -511,7 +513,7 @@ setup_dialog (GtkBuilder *dialog, GConfChangeSet *changeset)
+ 
+ /* Construct the dialog */
+ 
+-static GtkBuilder *
++GtkBuilder *
+ create_dialog (void)
+ {
+ 	GtkBuilder   *dialog;
+@@ -558,6 +560,8 @@ create_dialog (void)
+ 	gtk_size_group_add_widget (size_group, WID ("dwell_delay_long_label"));
+ 	gtk_size_group_add_widget (size_group, WID ("dwell_threshold_large_label"));
+ 
++        setup_dialog (dialog, NULL);
++
+ 	return dialog;
+ }
+ 
+@@ -573,13 +577,32 @@ dialog_response_cb (GtkDialog *dialog, gint response_id, GConfChangeSet *changes
+ 		gtk_main_quit ();
+ }
+ 
++GConfClient *
++mouse_properties_conf_init ()
++{
++	GConfClient *client;
++
++	capplet_init_stock_icons ();
++
++	activate_settings_daemon ();
++
++	client = gconf_client_get_default ();
++	gconf_client_add_dir (client, "/desktop/gnome/peripherals/mouse",
++			      GCONF_CLIENT_PRELOAD_ONELEVEL, NULL);
++	gconf_client_add_dir (client, "/desktop/gnome/peripherals/touchpad",
++			      GCONF_CLIENT_PRELOAD_ONELEVEL, NULL);
++
++	return client;
++}
++
++
+ int
+ main (int argc, char **argv)
+ {
+ 	GConfClient    *client;
+ 	GtkBuilder     *dialog;
+ 	GtkWidget      *dialog_win, *w;
+-	gchar *start_page = NULL;
++	gchar          *start_page = NULL;
+ 
+ 	GOptionContext *context;
+ 	GOptionEntry cap_options[] = {
+@@ -600,14 +623,11 @@ main (int argc, char **argv)
+ 
+ 	activate_settings_daemon ();
+ 
+-	client = gconf_client_get_default ();
+-	gconf_client_add_dir (client, "/desktop/gnome/peripherals/mouse", GCONF_CLIENT_PRELOAD_ONELEVEL, NULL);
+-	gconf_client_add_dir (client, "/desktop/gnome/peripherals/touchpad", GCONF_CLIENT_PRELOAD_ONELEVEL, NULL);
++	client = mouse_properties_conf_init ();
+ 
+ 	dialog = create_dialog ();
+ 
+ 	if (dialog) {
+-		setup_dialog (dialog, NULL);
+ 		setup_accessibility (dialog, client);
+ 
+ 		dialog_win = WID ("mouse_properties_dialog");
+diff --git a/capplets/mouse/gnome-mouse-properties.h b/capplets/mouse/gnome-mouse-properties.h
+new file mode 100644
+index 0000000..2c67fcc
+--- /dev/null
++++ b/capplets/mouse/gnome-mouse-properties.h
+@@ -0,0 +1,33 @@
++/* mouse-properties-capplet.h
++ *
++ * Copyright (C) 2010 Intel, Inc
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
++ * 02111-1307, USA.
++ *
++ * Written by: Thomas Wood <thos@gnome.org>
++ */
++
++
++#ifndef __GNOME_MOUSE_PROPETIES_H__
++#define __GNOME_MOUSE_PROPETIES_H__
++
++#include <gconf/gconf-client.h>
++#include <gtk/gtk.h>
++
++GtkBuilder* create_dialog (void);
++GConfClient* mouse_properties_conf_init (void);
++
++#endif /* __GNOME_MOUSE_PROPETIES_H__ */
+diff --git a/capplets/mouse/gnome-mouse-properties.ui b/capplets/mouse/gnome-mouse-properties.ui
+index b855ff1..ec57381 100644
+--- a/capplets/mouse/gnome-mouse-properties.ui
++++ b/capplets/mouse/gnome-mouse-properties.ui
+@@ -524,8 +524,8 @@
+                 </child>
+                 <child>
+                   <object class="GtkVBox" id="double_click_timeout_vbox">
+-                    <property name="visible">True</property>
+                     <property name="events">GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</property>
++                    <property name="no_show_all">True</property>
+                     <property name="orientation">vertical</property>
+                     <child>
+                       <object class="GtkLabel" id="label31">
+@@ -708,8 +708,8 @@
+             </child>
+             <child>
+               <object class="GtkVBox" id="accessibility_vbox">
+-                <property name="visible">True</property>
+                 <property name="events">GDK_POINTER_MOTION_MASK | GDK_POINTER_MOTION_HINT_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK</property>
++                <property name="no_show_all">True</property>
+                 <property name="border_width">12</property>
+                 <property name="orientation">vertical</property>
+                 <property name="spacing">18</property>
+diff --git a/capplets/mouse/mouse-module.c b/capplets/mouse/mouse-module.c
+new file mode 100644
+index 0000000..9628778
+--- /dev/null
++++ b/capplets/mouse/mouse-module.c
+@@ -0,0 +1,42 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*-
++ *
++ * Copyright (C) 2010 Red Hat, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ */
++
++#include <config.h>
++
++#include <glib.h>
++#include <glib/gi18n-lib.h>
++#include <gmodule.h>
++#include <gio/gio.h>
++
++#include "cc-mouse-panel.h"
++
++void
++g_io_module_load (GIOModule *module)
++{
++  bindtextdomain (GETTEXT_PACKAGE, GNOMELOCALEDIR);
++  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
++
++  cc_mouse_panel_register (module);
++}
++
++void
++g_io_module_unload (GIOModule *module)
++{
++}
+diff --git a/capplets/mouse/pointer-module.c b/capplets/mouse/pointer-module.c
+new file mode 100644
+index 0000000..7fdc09a
+--- /dev/null
++++ b/capplets/mouse/pointer-module.c
+@@ -0,0 +1,42 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++/*
++ * Copyright (C) 2010 Intel, Inc
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
++ *
++ * Author: Thomas Wood <thomas.wood@intel.com>
++ *
++ */
++
++#include <config.h>
++
++#include "cc-pointer-panel.h"
++
++#include <glib/gi18n.h>
++
++void
++g_io_module_load (GIOModule *module)
++{
++  bindtextdomain (GETTEXT_PACKAGE, GNOMELOCALEDIR);
++  bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
++
++  cc_pointer_panel_register (module);
++}
++
++void
++g_io_module_unload (GIOModule *module)
++{
++}
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index bd24b8e..3117ac8 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -73,6 +73,7 @@ capplets/keyboard/gnome-keyboard-properties-xkbmc.c
+ capplets/keyboard/gnome-keyboard-properties-xkbot.c
+ capplets/keyboard/gnome-keyboard-properties-xkbpv.c
+ capplets/keyboard/keyboard.desktop.in.in
++capplets/mouse/cc-pointer-panel.c
+ capplets/mouse/gnome-mouse-accessibility.c
+ capplets/mouse/gnome-mouse-properties.c
+ [type: gettext/glade]capplets/mouse/gnome-mouse-properties.ui
+-- 
+1.7.2.3
+
