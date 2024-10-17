@@ -4,7 +4,7 @@ Version: 2.30.1
 Release: %mkrel 1
 Group: System/Desktop
 License: GPLv2+ and GFDL
-URL: http://www.gnome.org
+URL: https://www.gnome.org
 Source0: http://download.gnome.org/sources/gnome-control-center/2.30/gnome-control-center-%{version}.tar.bz2
 Source1: meego-translations.tar.bz2
 Source2: gnome-appearance-properties.desktop
