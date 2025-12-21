@@ -33,6 +33,11 @@ Requires: usermode
 Requires: gnome-desktop
 Requires: dbus-x11
 Requires: GConf2
+BuildRequires:	autoconf
+BuildRequires:	automake
+BuildRequires:	libtool-base
+BuildRequires:	slibtool
+BuildRequires:	make
 BuildRequires: libgtk+2-devel
 BuildRequires: libglib2-devel
 BuildRequires: libglade2-devel
