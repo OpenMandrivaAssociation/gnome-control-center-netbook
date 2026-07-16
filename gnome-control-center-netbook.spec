@@ -1,7 +1,7 @@
 Name: gnome-control-center-netbook
 Summary: Utilities to configure the netbook desktop
 Version: 2.30.1
-Release: %mkrel 1
+Release: 2
 Group: System/Desktop
 License: GPLv2+ and GFDL
 URL: https://www.gnome.org
